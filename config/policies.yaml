@@ -1,0 +1,79 @@
+# Access policies (role-based, with row-level scopes).
+#
+# Enforcement is layered (see docs/SPEC.md section 11.2):
+#   1. Semantic pre-check: a request for a metric / dimension / table the role can't use is refused
+#      before any SQL is generated (analyst/policies.py).
+#   2. SQL validator: rejects restricted tables / columns in generated SQL (segment 3).
+#   3. Row-level scope: predicates are injected by the system. The LLM is told its scope
+#      but never trusted to apply it.
+#
+# Rules:
+#   * `tables` are allow-list glob patterns; `deny_tables` / `deny_columns` always win.
+#   * A metric is allowed only if every table and column it touches is allowed and the
+#     role is in its `restricted_to` list (when present).
+#   * `row_filters` reference semantic dimensions. Values come from `value` or from the
+#     signed-in user's attributes via `value_from: user.<attr>`.
+#   * Row-filter joins are system-applied: they may touch tables the role can't query directly.
+#   * If a row filter can't be applied to an entity, that entity is denied (fail closed).
+#   * Rows whose scoping attribute is NULL (e.g. attempts with no merchant) are excluded for scoped roles.
+#   * `inherits` merges: lists are unioned, scalars and `tables` are overridden when set on the child.
+
+defaults:
+  small_cell_threshold: 10          # segments with fewer rows are shown as "<10" (applied at presentation)
+  max_row_level_rows: 50            # cap for non-aggregated output when allowed
+  # What to do when a scoped user names something outside their scope (e.g. a WEST manager
+  # asks about a NORTH merchant): `refuse`, or `scope_and_disclose` (run within scope and say so).
+  out_of_scope_behaviour: refuse
+
+roles:
+  exec:
+    description: Leadership. All aggregated data, no row-level output.
+    tables: ["*"]
+    deny_columns: [dim_merchant.legal_entity_id]
+    allow_row_level_output: false
+
+  ops_analyst:
+    description: Payments operations. Attempts, orders and dimensions; no settlement or finance data.
+    tables: [v_attempts, v_orders, "dim_*", fact_payment_attempts_raw]
+    deny_tables: [finance_daily_settlement_summary, fact_settlements, fact_refunds]
+    deny_columns: ["*.mdr_fee_paise", "*.net_amount_paise", dim_merchant.legal_entity_id]
+    allow_row_level_output: true
+
+  regional_manager_west:
+    description: Regional manager. Same as ops analyst, limited to WEST merchants.
+    inherits: ops_analyst
+    tables: [v_attempts, v_orders, "dim_*"]
+    row_filters:
+      - {dimension: region, op: "=", value: WEST}
+
+  account_manager:
+    description: Account manager. Same as ops analyst, limited to their own merchants.
+    inherits: ops_analyst
+    tables: [v_attempts, v_orders, "dim_*"]
+    row_filters:
+      - {dimension: account_manager, op: "=", value_from: user.name}
+
+  finance:
+    description: Finance. Settlements, refunds, finance ledger, plus dashboard GMV for reconciliation.
+    tables: [fact_settlements, finance_daily_settlement_summary, fact_refunds, v_attempts, dim_merchant, dim_date, dim_payment_method]
+    deny_columns: [dim_merchant.legal_entity_id]
+    allow_row_level_output: true
+
+  merchant_user:
+    description: A merchant's own staff. Only their own transactions; internal routing is confidential.
+    tables: [v_attempts, v_orders, dim_payment_method, dim_issuer_bank, dim_date, dim_failure_reason]
+    deny_dimensions: [acquirer]
+    deny_metrics: [active_merchants, unmapped_merchant_rows]
+    row_filters:
+      # merchant_id, not merchant_key: keys are point-in-time (SCD2) and change on reclassification.
+      - {dimension: merchant_id, op: "=", value_from: user.merchant_id}
+    allow_row_level_output: true
+
+# Demo principals (no real authentication in this prototype).
+users:
+  u_exec:     {name: Meera Rao,       role: exec}
+  u_ops:      {name: Kabir Shah,      role: ops_analyst}
+  u_west:     {name: Neha Joshi,      role: regional_manager_west}
+  u_am:       {name: Divya Nair,      role: account_manager}
+  u_fin:      {name: Rahul Verma,     role: finance}
+  u_merchant: {name: QuickBazaar Ops, role: merchant_user, merchant_id: MID100121}

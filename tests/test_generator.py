@@ -9,7 +9,7 @@ from analyst.datagen import DEFAULT_CONFIG, generate, load_config
 
 import pandas as pd
 
-SCALE = 0.25
+from conftest import SCALE
 # Checks that are structural (not sensitive to sampling noise at reduced scale)
 STRUCTURAL = {
     ("BASE", "date range"), ("BASE", "v_attempts unique attempt_id"), ("BASE", "dimension keys resolve"),
@@ -22,13 +22,6 @@ STRUCTURAL = {
     ("A6", "difference fully explained"), ("A7", "pending spike on last day"),
     ("A8", "sale volume spike"), ("A10", "SCD history rows"),
 }
-
-
-@pytest.fixture(scope="module")
-def small_db(tmp_path_factory):
-    path = tmp_path_factory.mktemp("wh") / "small.duckdb"
-    manifest = generate(DEFAULT_CONFIG, path, scale=SCALE)
-    return path, manifest
 
 
 def test_expected_tables_and_views(small_db):

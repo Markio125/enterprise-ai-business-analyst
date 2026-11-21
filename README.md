@@ -9,8 +9,8 @@ The full design is in [`docs/SPEC.md`](docs/SPEC.md).
 | # | Segment | Status |
 |---|---|---|
 | 1 | **Data foundation**: synthetic warehouse + planted anomalies + ground truth | ✅ done |
-| 2 | Semantic layer + access policies | ⏳ next |
-| 3 | SQL safety (sqlglot validator, row-level security rewrite, cost guard) + read-only executor | ⬜ |
+| 2 | **Semantic layer + access policies**: metrics, dimensions, synonyms, time expressions, RBAC, row-level scope, catalog | ✅ done |
+| 3 | SQL safety (sqlglot validator, row-level security rewrite, cost guard) + read-only executor | ⏳ next |
 | 4 | LLM pipeline: parse → ambiguity check → plan → SQL generation → repair loop | ⬜ |
 | 5 | Analysis engine: mix/rate decomposition, driver ranking, drill-down, data-quality checks, reconciliation | ⬜ |
 | 6 | Answer composer: facts / hypotheses / recommendations, number grounding, confidence | ⬜ |
@@ -27,7 +27,18 @@ pip install -r requirements.txt
 
 python scripts/generate_data.py   # builds data/warehouse.duckdb (~1.05M attempts, ~15 s)
 python scripts/verify_data.py     # checks every planted anomaly, writes fixtures/ground_truth.json
+python scripts/check_semantic.py  # validates the semantic layer + policies, re-derives the ground truth through it
 pytest -q                         # fast tests at reduced scale
+```
+
+Try the semantic layer as different users:
+
+```bash
+python scripts/catalog.py --list-users
+python scripts/catalog.py --user u_west                       # what this user may ask about (LLM grounding block)
+python scripts/query.py --metric success_rate --by sub_method --time "last two weeks" --compare
+python scripts/query.py --user u_west --metric gmv_inr --by merchant --time "last month" --top 5
+python scripts/query.py --user u_ops --metric mdr_revenue_inr # -> REFUSED_ACCESS with alternatives
 ```
 
 `python scripts/generate_data.py --scale 0.2` builds a smaller warehouse for quick iteration. Output is deterministic for a given seed and config.
@@ -85,7 +96,56 @@ The exact numbers are in [`fixtures/ground_truth.json`](fixtures/ground_truth.js
 - Diwali 2026 (Nov 8) falls outside the data window, so the sale event is a fictional August "Freedom Sale".
 - "Today" for relative time is the **last complete day, 2026-10-27**. Oct 28 is deliberately partial.
 - `dim_terminal` is omitted (stretch). `is_tokenized` lives on the fact table.
-- With SCD2, joining on `merchant_key AND is_current` would drop history. The semantic layer (segment 2) joins on `merchant_key` for point-in-time attributes, and via `merchant_id` when current attributes are wanted.
+- With SCD2, joining on `merchant_key AND is_current` would drop history. The semantic layer joins on `merchant_key` for point-in-time attributes, and via `merchant_id` when current attributes are wanted.
+- Policies: the `finance` role also gets `v_attempts` / `dim_payment_method` so it can reconcile dashboard GMV against the ledger (A6). `merchant_user` is scoped by `merchant_id`, not `merchant_key`, because keys change on SCD reclassification. All roles are denied `dim_merchant.legal_entity_id`.
+- Out-of-scope requests default to **refuse** (the spec left this open).
+
+## The semantic layer (segment 2)
+
+[`semantic/model.yaml`](semantic/model.yaml) is the single source of business meaning. The LLM is grounded on it, and a deterministic compiler ([`analyst/semantic.py`](analyst/semantic.py)) turns `metric x dimensions x filters x time` into parameterised SQL.
+
+| Concept | What it holds |
+|---|---|
+| **Entities** | `attempts`, `orders`, `settlements`, `refunds`, `finance_summary`: table, grain, time bases, joins, measures |
+| **Measures** | Aggregate SQL fragments per entity (`success_count`, `non_cancelled_count`, ...) |
+| **Metrics** | 27 metrics built from measures. `success_rate` has 4 **variants** (attempt-level excl. cancels *(default)*, all attempts, technical, order-level) and the variant used is always disclosed. `failure_rate` is its complement. |
+| **Dimensions** | 40 dimensions with synonyms (*bank* -> `issuer_bank`, *mode* -> `payment_method`) |
+| **Ambiguous terms** | *revenue* (GMV vs MDR), *volume* (count vs value), *conversion*, *settled amount* (two ledgers), *segment* (then vs now) |
+| **Time expressions** | [`analyst/timeparse.py`](analyst/timeparse.py) resolves *last two weeks*, *last month*, *Q3*, *since 14 Oct* ... in IST against the data's **as-of date**. Vague phrases (*recently*) are flagged ambiguous with a default. |
+| **As-of date** | Detected from the data: the last day whose volume is >= 0.85 x the trailing 14-day median. This finds **Oct 27** and rejects the partial Oct 28 (A7). |
+
+How the compiler stays correct:
+
+- **Joins are inferred** from the aliases a query touches, with their dependencies, and nothing else is joined. For example, the current segment needs `merchant` and then `merchant_current`.
+- **Merchant attributes are point-in-time by default.** The facts join `dim_merchant` on `merchant_key` with no `is_current` filter. `merchant_current` gives today's attributes.
+- **Settlements have two time bases.** `settlement_date` is the default and `transaction_date` is the alternative. The basis used is disclosed because "settled this month" is ambiguous.
+- **Filter values are always bound parameters** and are never inlined into SQL.
+- **`model.validate(con)`** checks every alias, column, measure, synonym collision and join against the live warehouse, then executes every metric and every metric x dimension pair.
+
+`scripts/check_semantic.py` **re-derives the segment-1 ground truth through the compiler**: A9's four success-rate variants, A1's windows and per-method rates, A6's dashboard GMV / finance ledger / settled amounts, EV04's top-5 WEST merchants under row-level scope, and A10's point-in-time vs current segment. All 26 checks pass.
+
+### Access control
+
+[`config/policies.yaml`](config/policies.yaml) defines the roles and [`analyst/policies.py`](analyst/policies.py) enforces them. This is layer 1 (semantic pre-check). The SQL validator in segment 3 re-checks the generated SQL against the same rules.
+
+| Role | Can see | Scope |
+|---|---|---|
+| `exec` | everything aggregated; no row-level output | — |
+| `ops_analyst` | attempts, orders, dimensions, raw table; **no** settlements / finance / refunds / MDR | — |
+| `regional_manager_west` | as ops | `region = WEST` |
+| `account_manager` | as ops | `account_manager = <user name>` |
+| `finance` | settlements, refunds, finance ledger, MDR, plus dashboard GMV (for reconciliation) | — |
+| `merchant_user` | own attempts / orders; **acquirer is confidential** | `merchant_id = <user's MID>` |
+
+- A metric is allowed only if every table and column it touches is allowed, including the joins it needs, and it isn't `restricted_to` other roles. Example: `mdr_revenue_inr` is restricted to finance and exec.
+- **Row-level scope** is injected by the system as bound parameters. The LLM is never trusted to apply it. Scope joins may use tables the role can't query directly: a merchant user is filtered by `merchant_id` without access to `dim_merchant`.
+- **Failing closed:**
+  - A missing user attribute means the request is refused.
+  - If a scope can't be applied to an entity, that entity is denied.
+  - Rows with no merchant (A5) are excluded from scoped results, and the results disclose it.
+- Asking explicitly about something outside your scope (a WEST manager asking about NORTH) is **refused** by default. `out_of_scope_behaviour: scope_and_disclose` switches to running within scope and saying so.
+- Refusals follow the `REFUSED_ACCESS` contract: denied items, reasons, and alternatives the user *can* ask.
+- [`analyst/catalog.py`](analyst/catalog.py) builds the **role-filtered catalog**: metrics, dimensions, sample values, ambiguous terms, and what is not accessible. The same structure becomes `GET /catalog` in segment 7 and the grounding block in the LLM prompt in segment 4. Values that would leak across a scope (other regions or merchants) are left out.
 
 ## Repository layout
 
@@ -94,8 +154,14 @@ analyst/
   reference.py      static reference data (fictional banks, merchants, failure codes)
   datagen.py        deterministic generator → DuckDB
   data_checks.py    anomaly verification + ground-truth computation + mix/rate decomposition
+  semantic.py       semantic model loader, validator, term lookup, metric -> SQL compiler
+  timeparse.py      relative time expressions + as-of (last complete day) detection
+  policies.py       RBAC, row-level scope, refusal contract
+  catalog.py        role-filtered catalog (JSON + LLM-prompt markdown)
+semantic/model.yaml     entities, measures, metrics, dimensions, ambiguous terms, glossary
 config/generator.yaml   every generator knob (volumes, rates, anomaly windows and magnitudes)
-scripts/            generate_data.py, verify_data.py
+config/policies.yaml    roles, row-level scopes, demo users
+scripts/            generate_data.py, verify_data.py, check_semantic.py, catalog.py, query.py
 fixtures/ground_truth.json
 tests/
 docs/SPEC.md        full system specification

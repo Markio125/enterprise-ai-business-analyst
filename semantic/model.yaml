@@ -1,0 +1,449 @@
+# Semantic layer for the payments warehouse.
+#
+# The LLM is grounded on this file, never on the raw schema alone, and the
+# deterministic compiler (analyst/semantic.py) turns metric requests into SQL
+# from it. Conventions:
+#   * Every column reference is qualified with an alias: an entity name
+#     (attempts, orders, ...) or a join name (merchant, issuer, date, ...).
+#   * Measures are aggregate SQL fragments. Metrics combine measures with
+#     {measure_name} placeholders. A metric may only use measures from its entity.
+#   * Required joins are inferred from the aliases a query references.
+#   * `python scripts/check_semantic.py` validates every reference against the warehouse.
+
+version: 1
+timezone: Asia/Kolkata
+# "today" for relative time = the last COMPLETE IST day, detected from the data
+# (a day counts as complete when its volume is >= completeness_ratio x the median
+# of the previous 14 days). Set `as_of_override` to pin it.
+as_of:
+  completeness_ratio: 0.85
+  as_of_override: null
+
+# --------------------------------------------------------------------------- entities
+entities:
+  attempts:
+    table: v_attempts
+    grain: payment attempt (deduplicated)
+    description: >
+      One row per payment attempt. Retries of the same order are separate attempts.
+      Built from fact_payment_attempts_raw with replayed duplicates removed.
+    time:
+      default: transaction_date
+      columns:
+        transaction_date: {expr: attempts.date_key, type: date_key, description: IST business day of the attempt}
+    joins:
+      merchant:
+        table: dim_merchant
+        on: merchant.merchant_key = attempts.merchant_key
+        description: Merchant attributes AS OF the transaction (SCD2 point-in-time). Do not add is_current here.
+      merchant_current:
+        table: dim_merchant
+        on: merchant_current.merchant_id = merchant.merchant_id AND merchant_current.is_current
+        requires: [merchant]
+        description: The merchant's CURRENT attributes (use for "today's segment" questions).
+      payment_method: {table: dim_payment_method, on: payment_method.payment_method_key = attempts.payment_method_key}
+      issuer:         {table: dim_issuer_bank,    on: issuer.issuer_key = attempts.issuer_key}
+      acquirer:       {table: dim_acquirer,       on: acquirer.acquirer_key = attempts.acquirer_key}
+      failure_reason: {table: dim_failure_reason, on: failure_reason.failure_reason_key = attempts.failure_reason_key}
+      date:           {table: dim_date,           on: date.date_key = attempts.date_key}
+      refund:
+        table: fact_refunds
+        on: refund.attempt_id = attempts.attempt_id
+        description: At most one refund per attempt (validated), so this join never fans out.
+    measures:
+      attempt_count:          COUNT(*)
+      success_count:          COUNT(*) FILTER (WHERE attempts.status = 'SUCCESS')
+      non_cancelled_count:    COUNT(*) FILTER (WHERE attempts.status <> 'USER_CANCELLED')
+      technical_denominator:  COUNT(*) FILTER (WHERE attempts.status = 'SUCCESS' OR NOT COALESCE(failure_reason.is_customer_attributable, FALSE))
+      timeout_count:          COUNT(*) FILTER (WHERE attempts.status = 'TIMEOUT')
+      pending_count:          COUNT(*) FILTER (WHERE attempts.status = 'PENDING')
+      cancelled_count:        COUNT(*) FILTER (WHERE attempts.status = 'USER_CANCELLED')
+      success_value_inr:      SUM(attempts.amount_paise) FILTER (WHERE attempts.status = 'SUCCESS') / 100.0
+      attempted_value_inr:    SUM(attempts.amount_paise) / 100.0
+      p95_latency_ms:         QUANTILE_CONT(attempts.latency_ms, 0.95)
+      median_latency_ms:      QUANTILE_CONT(attempts.latency_ms, 0.5)
+      refunded_count:         COUNT(refund.refund_id)
+      active_merchant_count:  COUNT(DISTINCT merchant.merchant_id) FILTER (WHERE attempts.status = 'SUCCESS')
+      unmapped_merchant_rows: COUNT(*) FILTER (WHERE attempts.merchant_key IS NULL)
+
+  orders:
+    table: v_orders
+    grain: order (all attempts for one checkout)
+    description: >
+      One row per order. is_success = 1 if any attempt succeeded. Merchant, date and payment
+      method come from the FIRST attempt.
+    time:
+      default: transaction_date
+      columns:
+        transaction_date: {expr: orders.date_key, type: date_key, description: IST day of the first attempt}
+    joins:
+      merchant:         {table: dim_merchant, on: merchant.merchant_key = orders.merchant_key, description: Point-in-time merchant attributes}
+      merchant_current: {table: dim_merchant, on: merchant_current.merchant_id = merchant.merchant_id AND merchant_current.is_current, requires: [merchant]}
+      payment_method:   {table: dim_payment_method, on: payment_method.payment_method_key = orders.first_payment_method_key, description: Method of the first attempt}
+      date:             {table: dim_date, on: date.date_key = orders.date_key}
+    measures:
+      order_count:       COUNT(*)
+      paid_order_count:  SUM(orders.is_success)
+      retried_order_count: COUNT(*) FILTER (WHERE orders.attempt_count > 1)
+      paid_value_inr:    SUM(orders.paid_amount_paise) / 100.0
+
+  settlements:
+    table: fact_settlements
+    grain: settlement line (one per successful attempt)
+    description: Operational settlement ledger. Amounts in paise. Status SETTLED / PENDING / ON_HOLD / REVERSED / FAILED.
+    time:
+      default: settlement_date
+      ambiguous: true    # "settled this month" can mean settlement date or transaction date: disclose / clarify
+      columns:
+        settlement_date:  {expr: settlements.settlement_date_key, type: date_key, description: Day the money was settled (T+1, weekends roll to Monday)}
+        transaction_date: {expr: attempt.date_key, type: date_key, description: IST day of the underlying payment}
+    joins:
+      attempt:          {table: v_attempts,   on: attempt.attempt_id = settlements.attempt_id, description: The underlying payment attempt (one-to-one)}
+      merchant:         {table: dim_merchant, on: merchant.merchant_key = settlements.merchant_key}
+      merchant_current: {table: dim_merchant, on: merchant_current.merchant_id = merchant.merchant_id AND merchant_current.is_current, requires: [merchant]}
+      payment_method:   {table: dim_payment_method, on: payment_method.payment_method_key = attempt.payment_method_key, requires: [attempt]}
+      date:             {table: dim_date, on: date.date_key = settlements.settlement_date_key, description: Settlement date}
+    measures:
+      settlement_line_count: COUNT(*)
+      settled_gross_inr:     SUM(settlements.gross_amount_paise) FILTER (WHERE settlements.settlement_status = 'SETTLED') / 100.0
+      settled_net_inr:       SUM(settlements.net_amount_paise) FILTER (WHERE settlements.settlement_status = 'SETTLED') / 100.0
+      gross_all_status_inr:  SUM(settlements.gross_amount_paise) / 100.0
+      mdr_fee_inr:           SUM(settlements.mdr_fee_paise) FILTER (WHERE settlements.settlement_status = 'SETTLED') / 100.0
+      gst_on_fee_inr:        SUM(settlements.gst_on_fee_paise) FILTER (WHERE settlements.settlement_status = 'SETTLED') / 100.0
+      avg_lag_days:          AVG(settlements.settlement_lag_days)
+      not_settled_count:     COUNT(*) FILTER (WHERE settlements.settlement_status <> 'SETTLED')
+
+  refunds:
+    table: fact_refunds
+    grain: refund
+    description: Refunds against successful attempts.
+    time:
+      default: refund_date
+      columns:
+        refund_date: {expr: refunds.refund_date_key, type: date_key, description: Day the refund was raised}
+    joins:
+      merchant:         {table: dim_merchant, on: merchant.merchant_key = refunds.merchant_key}
+      merchant_current: {table: dim_merchant, on: merchant_current.merchant_id = merchant.merchant_id AND merchant_current.is_current, requires: [merchant]}
+      date:             {table: dim_date, on: date.date_key = refunds.refund_date_key}
+    measures:
+      refund_count:      COUNT(*)
+      refund_value_inr:  SUM(refunds.refund_amount_paise) FILTER (WHERE refunds.refund_status <> 'FAILED') / 100.0
+
+  finance_summary:
+    table: finance_daily_settlement_summary
+    grain: merchant x UTC day
+    description: >
+      Finance team's independent ledger. UTC calendar day (not IST), rupees, SETTLED only,
+      keyed by merchant_id. Some merchant IDs are not mapped. Expect it to disagree with
+      dashboard GMV: see the reconciliation method.
+    time:
+      default: summary_date
+      columns:
+        summary_date: {expr: finance_summary.summary_date, type: date, description: UTC calendar day of the transaction}
+    joins:
+      merchant:
+        table: dim_merchant
+        on: merchant.merchant_id = finance_summary.merchant_id AND merchant.is_current
+        description: Current merchant attributes (finance has no point-in-time key)
+      date: {table: dim_date, on: date.date = finance_summary.summary_date, description: UTC day joined to the calendar}
+    measures:
+      finance_gross_inr: SUM(finance_summary.gross_amount_inr)
+      finance_net_inr:   SUM(finance_summary.net_amount_inr)
+      finance_txn_count: SUM(finance_summary.txn_count)
+
+# --------------------------------------------------------------------------- metrics
+metrics:
+  attempt_count:
+    entity: attempts
+    sql: "{attempt_count}"
+    format: integer
+    description: Number of payment attempts (retries counted separately).
+    synonyms: [attempts, transactions, txn count, transaction count, number of transactions]
+
+  success_count:
+    entity: attempts
+    sql: "{success_count}"
+    format: integer
+    description: Number of successful attempts.
+    synonyms: [successful transactions, successes]
+
+  success_rate:
+    description: Share of payment attempts that succeeded. The name is ambiguous, so always disclose the variant.
+    synonyms: [sr, approval rate, auth rate, authorization rate, payment success rate, success %]
+    format: percent
+    better: higher
+    default_variant: attempt_level_excl_user_cancel
+    ambiguity_flag: true
+    variants:
+      attempt_level_excl_user_cancel:
+        entity: attempts
+        sql: "{success_count} * 1.0 / NULLIF({non_cancelled_count}, 0)"
+        description: Successful attempts / attempts excluding user-cancelled (DEFAULT)
+      attempt_level_all:
+        entity: attempts
+        sql: "{success_count} * 1.0 / NULLIF({attempt_count}, 0)"
+        description: Successful attempts / all attempts
+      technical:
+        entity: attempts
+        sql: "{success_count} * 1.0 / NULLIF({technical_denominator}, 0)"
+        description: Excludes customer-attributable failures (insufficient funds, wrong PIN, user drop)
+      order_level:
+        entity: orders
+        sql: "{paid_order_count} * 1.0 / NULLIF({order_count}, 0)"
+        description: Share of orders eventually paid after retries
+        synonyms: [checkout conversion, payment conversion, order success rate]
+
+  failure_rate:
+    complement_of: success_rate      # 1 - success_rate, same variants
+    description: 1 - success rate (same variant rules).
+    synonyms: [decline rate, failure %, drop-off rate]
+    format: percent
+    better: lower
+
+  timeout_rate:
+    entity: attempts
+    sql: "{timeout_count} * 1.0 / NULLIF({attempt_count}, 0)"
+    format: percent
+    better: lower
+    description: Share of attempts that timed out (gateway / acquirer / network).
+    synonyms: [timeouts, timeout %]
+
+  pending_rate:
+    entity: attempts
+    sql: "{pending_count} * 1.0 / NULLIF({attempt_count}, 0)"
+    format: percent
+    better: lower
+    description: Share of attempts still PENDING (unconfirmed). A spike usually means late data.
+
+  user_cancel_rate:
+    entity: attempts
+    sql: "{cancelled_count} * 1.0 / NULLIF({attempt_count}, 0)"
+    format: percent
+    better: lower
+    description: Share of attempts the customer abandoned.
+    synonyms: [cancellation rate, abandonment rate]
+
+  gmv_inr:
+    entity: attempts
+    sql: "{success_value_inr}"
+    format: currency_inr
+    better: higher
+    description: >
+      Gross merchandise value: total amount of successful attempts, by IST transaction day.
+      This is the "dashboard GMV". It is NOT the settled amount (see settled_gmv_inr / finance_gross_inr).
+    synonyms: [gmv, gross merchandise value, processed value, payment volume, tpv, sales]
+
+  attempted_value_inr:
+    entity: attempts
+    sql: "{attempted_value_inr}"
+    format: currency_inr
+    description: Total amount of all attempts, successful or not.
+
+  avg_ticket_inr:
+    entity: attempts
+    sql: "{success_value_inr} / NULLIF({success_count}, 0)"
+    format: currency_inr
+    description: Average successful transaction amount.
+    synonyms: [average ticket size, ats, aov, average order value]
+
+  p95_latency_ms:
+    entity: attempts
+    sql: "{p95_latency_ms}"
+    format: integer
+    better: lower
+    description: 95th percentile response latency in milliseconds.
+    synonyms: [latency, p95, response time]
+
+  median_latency_ms:
+    entity: attempts
+    sql: "{median_latency_ms}"
+    format: integer
+    better: lower
+    description: Median response latency in milliseconds.
+
+  refund_rate:
+    entity: attempts
+    sql: "{refunded_count} * 1.0 / NULLIF({success_count}, 0)"
+    format: percent
+    better: lower
+    description: Share of successful attempts (by transaction day) that were later refunded.
+
+  active_merchants:
+    entity: attempts
+    sql: "{active_merchant_count}"
+    format: integer
+    description: Distinct merchants (by merchant_id, so SCD changes are not double-counted) with at least one success.
+    synonyms: [transacting merchants, live merchants]
+
+  unmapped_merchant_rows:
+    entity: attempts
+    sql: "{unmapped_merchant_rows}"
+    format: integer
+    description: Attempts with no merchant key (data-quality metric).
+
+  order_count:
+    entity: orders
+    sql: "{order_count}"
+    format: integer
+    description: Number of orders (checkouts).
+    synonyms: [orders, checkouts]
+
+  retry_rate:
+    entity: orders
+    sql: "{retried_order_count} * 1.0 / NULLIF({order_count}, 0)"
+    format: percent
+    description: Share of orders that needed more than one attempt.
+    synonyms: [retries]
+
+  settled_gmv_inr:
+    entity: settlements
+    sql: "{settled_gross_inr}"
+    format: currency_inr
+    description: Gross amount with settlement_status = SETTLED in the operational ledger (paise to rupees).
+    synonyms: [settled value, settlements, settled gmv]
+
+  net_settled_inr:
+    entity: settlements
+    sql: "{settled_net_inr}"
+    format: currency_inr
+    description: Amount paid out to merchants after MDR and GST on fee (SETTLED only).
+    synonyms: [net settlement, payout, net payout]
+
+  mdr_revenue_inr:
+    entity: settlements
+    sql: "{mdr_fee_inr}"
+    format: currency_inr
+    restricted_to: [finance, exec]
+    description: MDR fee earned on settled transactions (excludes GST). Finance-restricted.
+    synonyms: [mdr, mdr revenue, fee revenue, take rate revenue]
+
+  avg_settlement_lag_days:
+    entity: settlements
+    sql: "{avg_lag_days}"
+    format: decimal
+    better: lower
+    description: Average days from transaction to settlement.
+    synonyms: [settlement lag, settlement delay, tat]
+
+  settlement_issue_rate:
+    entity: settlements
+    sql: "{not_settled_count} * 1.0 / NULLIF({settlement_line_count}, 0)"
+    format: percent
+    better: lower
+    description: Share of settlement lines not SETTLED (pending, on hold, reversed, failed).
+
+  refund_count:
+    entity: refunds
+    sql: "{refund_count}"
+    format: integer
+    description: Number of refunds raised (by refund date).
+    synonyms: [refunds]
+
+  refund_value_inr:
+    entity: refunds
+    sql: "{refund_value_inr}"
+    format: currency_inr
+    description: Refund amount excluding failed refunds (by refund date).
+
+  finance_gross_inr:
+    entity: finance_summary
+    sql: "{finance_gross_inr}"
+    format: currency_inr
+    description: Finance ledger gross settled amount (UTC day, SETTLED only, mapped merchants only).
+    synonyms: [finance settled amount, finance gmv, finance numbers, ledger amount]
+
+  finance_net_inr:
+    entity: finance_summary
+    sql: "{finance_net_inr}"
+    format: currency_inr
+    description: Finance ledger net amount.
+
+  finance_txn_count:
+    entity: finance_summary
+    sql: "{finance_txn_count}"
+    format: integer
+    description: Finance ledger transaction count.
+
+# Words that map to more than one metric: the pipeline must clarify or disclose.
+ambiguous_terms:
+  revenue:        {candidates: [gmv_inr, mdr_revenue_inr, net_settled_inr], default: gmv_inr, note: '"Revenue" can mean processed value (GMV) or the fee we earn (MDR).'}
+  volume:         {candidates: [attempt_count, gmv_inr], default: attempt_count, note: "Count of transactions or their value?"}
+  conversion:     {candidates: ["success_rate:order_level", "success_rate:attempt_level_excl_user_cancel"], default: "success_rate:order_level"}
+  settled amount: {candidates: [settled_gmv_inr, finance_gross_inr], default: settled_gmv_inr, note: "Two sources (operational ledger vs finance ledger) that legitimately differ."}
+  segment:        {candidates: [merchant_segment, merchant_segment_current], default: merchant_segment, note: "Segment at transaction time or today?"}
+
+# --------------------------------------------------------------------------- dimensions
+dimensions:
+  payment_method:   {expr: payment_method.method,       synonyms: [method, mode, payment mode, instrument, payment type]}
+  sub_method:       {expr: payment_method.sub_method,   synonyms: [upi flow, card type, sub method, payment sub type]}
+  card_network:     {expr: payment_method.card_network, synonyms: [network, scheme, card scheme]}
+  flow:             {expr: payment_method.flow,         description: UPI flow / card flow detail}
+  issuer_bank:      {expr: issuer.bank_name,            synonyms: [bank, issuer, issuing bank]}
+  issuer_type:      {expr: issuer.bank_type,            synonyms: [bank type]}
+  acquirer:         {expr: acquirer.acquirer_name,      synonyms: [acquiring bank, route, routing, processor]}
+  merchant:         {expr: merchant.merchant_name,      synonyms: [store, client, seller, merchant name], high_cardinality: true}
+  merchant_id:      {expr: merchant.merchant_id,        synonyms: [mid], high_cardinality: true}
+  merchant_segment: {expr: merchant.segment,            synonyms: [tier, merchant size, merchant tier], description: Segment at transaction time (point-in-time)}
+  merchant_segment_current: {expr: merchant_current.segment, synonyms: [current segment], description: Merchant's segment today}
+  category:         {expr: merchant.category,           synonyms: [vertical, industry, mcc group, merchant category]}
+  region:           {expr: merchant.region,             synonyms: [zone]}
+  city:             {expr: merchant.city,               high_cardinality: true}
+  city_tier:        {expr: merchant.city_tier}
+  integration_type: {expr: merchant.integration_type,   synonyms: [integration]}
+  account_manager:  {expr: merchant.account_manager,    synonyms: [am, relationship manager, kam]}
+  risk_band:        {expr: merchant.risk_band}
+  failure_category: {expr: failure_reason.failure_category, synonyms: [decline reason, failure type, decline category]}
+  failure_reason:   {expr: failure_reason.description,  synonyms: [error, decline description]}
+  response_code:    {expr: failure_reason.response_code, synonyms: [error code, decline code]}
+  status:           {expr: attempts.status,             synonyms: [attempt status, outcome]}
+  device_type:      {expr: attempts.device_type,        synonyms: [platform, os, device]}
+  channel:          {expr: attempts.channel,            synonyms: [checkout channel, surface]}
+  source_system:    {expr: attempts.source_system}
+  attempt_number:   {expr: attempts.attempt_no,         synonyms: [attempt no, retry number]}
+  is_3ds:           {expr: attempts.is_3ds}
+  is_tokenized:     {expr: attempts.is_tokenized,       synonyms: [tokenized, card on file]}
+  hour:             {expr: attempts.hour_ist,           synonyms: [hour of day], description: IST hour 0-23}
+  settlement_status: {expr: settlements.settlement_status}
+  refund_status:    {expr: refunds.refund_status}
+  refund_type:      {expr: refunds.refund_type}
+  day:              {expr: date.date,         synonyms: [date, daily], time_grain: day}
+  week:             {expr: date.week_start,   synonyms: [weekly], time_grain: week}
+  month:            {expr: date.month,        synonyms: [monthly], time_grain: month}
+  quarter:          {expr: date.quarter,      time_grain: quarter}
+  day_of_week:      {expr: date.day_of_week,  synonyms: [weekday]}
+  is_weekend:       {expr: date.is_weekend}
+  sale_event:       {expr: date.event_name,   synonyms: [event, sale, campaign period]}
+  holiday:          {expr: date.holiday_name}
+
+# --------------------------------------------------------------------------- time expressions
+# Resolved by analyst/timeparse.py in IST, relative to the data's as-of date (not the wall clock).
+time_expressions:
+  supported:
+    today: as_of
+    yesterday: as_of - 1
+    last N days: as_of-(N-1) .. as_of
+    last N weeks / last two weeks: rolling N*7 days ending as_of
+    last week: previous Monday-Sunday
+    this week: Monday of as_of's week .. as_of
+    this month / mtd: 1st of as_of's month .. as_of
+    last month: previous calendar month
+    this quarter / qtd: quarter start .. as_of
+    last quarter: previous calendar quarter
+    Q1..Q4 [year]: calendar quarter (as_of's year by default)
+    <month name> [year]: that calendar month
+    since <date>: date .. as_of
+    <date> / between <date> and <date>: explicit ISO dates
+  ambiguous: [recently, lately, of late, these days, past few days, a while]
+  ambiguous_default: last 14 days
+  comparison_default: previous period of equal length
+
+# --------------------------------------------------------------------------- glossary
+glossary:
+  mix effect: Change in a rate caused by traffic shifting between segments with different rates.
+  rate effect: Change in a rate caused by segments' own rates changing.
+  technical decline: Failure caused by an issuer, network, acquirer or gateway, not the customer.
+  customer-attributable failure: Insufficient funds, wrong PIN/OTP, user drop. Not fixable by the platform.
+  point-in-time attribute: A merchant attribute as it was when the transaction happened (SCD2).
+  dashboard GMV: Successful attempt amounts by IST transaction day, from the payments warehouse.
+  finance ledger: Finance's settlement summary. UTC days, SETTLED only, mapped merchants only.
+  IST business day: Days run 00:00-23:59 Asia/Kolkata. Timestamps are stored in UTC.
