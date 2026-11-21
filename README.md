@@ -11,8 +11,8 @@ The full design is in [`docs/SPEC.md`](docs/SPEC.md).
 | 1 | **Data foundation**: synthetic warehouse + planted anomalies + ground truth | ✅ done |
 | 2 | **Semantic layer + access policies**: metrics, dimensions, synonyms, time expressions, RBAC, row-level scope, catalog | ✅ done |
 | 3 | **SQL safety**: sqlglot validator (S01–S16), row-level security rewrite, cost guard, sealed read-only executor | ✅ done |
-| 4 | LLM pipeline: parse → ambiguity check → plan → SQL generation → repair loop | ⏳ next |
-| 5 | Analysis engine: mix/rate decomposition, driver ranking, drill-down, data-quality checks, reconciliation | ⬜ |
+| 4 | **LLM pipeline**: parse → access pre-check → ambiguity check (probes) → plan → SQL generation → repair loop | ✅ done |
+| 5 | Analysis engine: mix/rate decomposition, driver ranking, drill-down, data-quality checks, reconciliation | ⏳ next |
 | 6 | Answer composer: facts / hypotheses / recommendations, number grounding, confidence | ⬜ |
 | 7 | API (FastAPI + SSE) + metadata DB | ⬜ |
 | 8 | UI | ⬜ |
@@ -29,6 +29,7 @@ python scripts/generate_data.py   # builds data/warehouse.duckdb (~1.05M attempt
 python scripts/verify_data.py     # checks every planted anomaly, writes fixtures/ground_truth.json
 python scripts/check_semantic.py  # validates the semantic layer + policies, re-derives the ground truth through it
 python scripts/check_safety.py    # ground truth through the SQL gate + an attack catalog (34 checks)
+python scripts/check_pipeline.py  # the SPEC eval questions through the question pipeline (29 checks)
 pytest -q                         # fast tests at reduced scale
 ```
 
@@ -44,6 +45,11 @@ python scripts/query.py --user u_ops --metric mdr_revenue_inr # -> REFUSED_ACCES
 # free-form SQL through the safety gate (what LLM-generated SQL will go through)
 python scripts/run_sql.py --user u_west --explain "SELECT COUNT(*) FROM v_attempts WHERE date_key >= 20261001"
 python scripts/run_sql.py --user u_ops "SELECT 1; DROP TABLE v_attempts"
+
+# ask questions in plain English (segment 4); -i keeps a session for clarifications and follow-ups
+python scripts/ask.py -i --user u_exec
+python scripts/ask.py --user u_exec --answer METRIC_DEFINITION:success_rate=a "Why did our payment success rate drop in the last two weeks?"
+python scripts/ask.py --user u_west "Top 5 merchants by GMV last month"
 ```
 
 `python scripts/generate_data.py --scale 0.2` builds a smaller warehouse for quick iteration. Output is deterministic for a given seed and config.
@@ -104,6 +110,8 @@ The exact numbers are in [`fixtures/ground_truth.json`](fixtures/ground_truth.js
 - With SCD2, joining on `merchant_key AND is_current` would drop history. The semantic layer joins on `merchant_key` for point-in-time attributes, and via `merchant_id` when current attributes are wanted.
 - Policies: the `finance` role also gets `v_attempts` / `dim_payment_method` so it can reconcile dashboard GMV against the ledger (A6). `merchant_user` is scoped by `merchant_id`, not `merchant_key`, because keys change on SCD reclassification. All roles are denied `dim_merchant.legal_entity_id`.
 - Out-of-scope requests default to **refuse** (the spec left this open).
+- Planning is deterministic templates rather than an LLM planner: the metric layer covers the SPEC question types exactly, and the LLM writes SQL only for what it can't express. The ambiguity materiality threshold is 5%, not 10%, so the success-rate definitions (about 6-7% apart here) are asked about, as in the demo script.
+- The A2 eval question uses the ground-truth date (Sep 10, Meridian Bank), not the spec's Oct 12 / YES Bank.
 
 ## The semantic layer (segment 2)
 
@@ -185,6 +193,58 @@ Filter values from the semantic path are inlined by sqlglot as escaped literals.
 
 `scripts/check_safety.py` runs the A9, A6 and EV04 ground truth through the full gate, plus 25 attacks (stacked statements, file exfiltration, CTE shadowing, PII through `SELECT *` and CTEs, routing leaks, join explosions ...). All 34 pass. `tests/test_sqlsafety.py` has about 100 adversarial cases.
 
+## Question pipeline (segment 4)
+
+[`analyst/pipeline.py`](analyst/pipeline.py) `Analyst.ask(question, user_id, session)` runs the SPEC section 7 state machine up to executed queries:
+
+```
+PARSING ─┬─ data-change request ───────────────▶ REJECTED_UNSAFE   (before any SQL exists)
+         ├─ off-topic / unknown metric / definition ▶ ANSWERED_DIRECT
+ACCESS_PRECHECK ── restricted metric, out-of-scope filter ▶ REFUSED_ACCESS
+AMBIGUITY_CHECK ── material ambiguity (probe values shown) ▶ AWAITING_CLARIFICATION ─ answer ─▶ re-run
+PLANNING ── result larger than the row cap ─────────▶ AWAITING_NARROWING ─ option ─▶ re-run
+SQL_GENERATION ⇄ VALIDATION ⇄ EXECUTION (repair loop ≤ 2) ──▶ EXECUTED   (hand-off to segments 5-6)
+```
+
+**LLM proposes, code disposes.**
+
+- **Parsing.** The model (Claude Haiku 5.5 by default) returns JSON in a fixed schema. Structured outputs guarantee the shape. It sees only the user's role-filtered catalog.
+  - Code then re-checks every metric and dimension name against the semantic layer. Invalid names go back to the model with the error, up to two retries; after that they become `unknown_terms`.
+  - Filter values are snapped to real dimension values.
+  - Time phrases are copied verbatim and resolved by `timeparse.py`, never by the model.
+- **Access pre-check.** Each metric is authorized with the requested breakdowns and filters.
+  - Merchant names are resolved **inside the user's scope**, by a query that runs through the gate with row-level security. An out-of-scope merchant and a non-existent one get the same answer.
+  - A fuzzy match is offered as "did you mean …?" and never substituted silently.
+- **Ambiguity** ([`analyst/ambiguity.py`](analyst/ambiguity.py)). Rules decide what is ambiguous; probe queries, run as the user, decide whether it matters.
+  - The four success-rate definitions differ by about 6-7% on this data (85.5% vs 93.3%), above the 5% materiality threshold. So a bare "success rate" asks, with each definition's value shown.
+  - A vague period ("lately") asks. A missing period uses the last 30 days, disclosed.
+  - Business words with different units ("revenue": GMV or MDR) always ask, but only when the user can see more than one reading. For ops, "revenue" simply means GMV.
+  - Answers are stored on the `Session` under stable keys (`METRIC_DEFINITION:success_rate`). After two clarification turns the defaults are used and disclosed.
+- **Planning** ([`analyst/planner.py`](analyst/planner.py)) is deterministic.
+  - Each question type has a template: driver analysis, trend, ranking, comparison, lookup or reconciliation.
+  - Every query step is a `QuerySpec` that the semantic compiler turns into exact metric SQL.
+  - Driver analyses get both periods for every candidate dimension, with volume columns for the decomposition, inside a query budget. Dimensions a filter already fixes are skipped.
+  - COMPUTE and DQ_CHECK steps are declared but marked as deferred to segment 5.
+  - A result-size guard estimates the output rows (e.g. day × hour × merchant over a year is about 1.1M) and offers concrete narrowing options instead of running.
+- **SQL generation and repair** ([`analyst/sqlgen.py`](analyst/sqlgen.py)). The model writes SQL only for steps the metric layer can't express (`custom_request`). It runs on Claude Opus 5.5, with the role-filtered schema and the canonical metric definitions in the prompt.
+  - Whatever it writes goes through the segment 3 gate.
+  - Repairable failures and execution errors go back to the model with the exact error, at most 2 times.
+  - Unsafe SQL, access denials and too-expensive queries are final and never re-prompted.
+- **Follow-ups** ("Drill into UPI Collect by merchant") keep the previous metric, periods and filters.
+- **Trace.** Every stage appends `{stage, status, ms, tokens}` to `trace`, for the steps panel and the `run_steps` table later.
+
+### LLM backends
+
+[`analyst/llm.py`](analyst/llm.py) has one interface, `llm.json(task, system, user, schema, tier)`, with three implementations:
+
+| Backend | When | Notes |
+|---|---|---|
+| `AnthropicLLM` | `llm.provider: auto` with `ANTHROPIC_API_KEY` (or an `ant auth login` profile) set, or `--llm anthropic` | Official `anthropic` SDK with structured outputs (`output_config.format`). The stable system prompt is cached (`cache_control`). Effort is `low` for parsing and `medium` for SQL. Opus calls opt into the server-side refusal fallback (`fallbacks: "default"`). Refusals and `max_tokens` cut-offs raise, so the pipeline fails gracefully. |
+| `OfflineLLM` | no credentials (the default here) | Deterministic rule-based parser in [`analyst/intent.py`](analyst/intent.py). It reads the structured context rather than the prompt and covers the demo and eval questions. It cannot write custom SQL and says so. |
+| `ScriptedLLM` | tests | Replays canned replies (including invalid JSON and dangerous SQL) to drive retries, the repair loop and the gate. |
+
+Configuration lives in `config/analyst.yaml` under `llm:`, `defaults:` and `ambiguity:`. `scripts/check_pipeline.py --llm anthropic` runs the same eval checks through Claude.
+
 ## Repository layout
 
 ```
@@ -199,11 +259,18 @@ analyst/
   sqlsafety.py      SQL validator (S01-S16), RLS rewrite, cost guard, seal
   executor.py       sandboxed read-only executor + QueryGateway (the single query entry point)
   settings.py       loads config/analyst.yaml
+  llm.py            LLM backends: Anthropic (structured outputs), offline rules, scripted
+  intent.py         intent schema + prompt, normalisation against the semantic layer, offline parser
+  ambiguity.py      ambiguity rules, materiality probes, in-scope merchant resolution
+  planner.py        question-type plan templates, result-size guard / narrowing
+  sqlgen.py         LLM SQL generation + repair loop through the safety gate
+  pipeline.py       the state machine (Analyst.ask), Session, trace
 semantic/model.yaml     entities, measures, metrics, dimensions, ambiguous terms, glossary
 config/generator.yaml   every generator knob (volumes, rates, anomaly windows and magnitudes)
 config/policies.yaml    roles, row-level scopes, demo users
 config/analyst.yaml     warehouse limits, cost controls, SQL-safety lists
-scripts/            generate_data.py, verify_data.py, check_semantic.py, check_safety.py, catalog.py, query.py, run_sql.py
+scripts/            generate_data.py, verify_data.py, check_semantic.py, check_safety.py, check_pipeline.py,
+                    catalog.py, query.py, run_sql.py, ask.py
 fixtures/ground_truth.json
 tests/
 docs/SPEC.md        full system specification
@@ -215,4 +282,6 @@ docs/SPEC.md        full system specification
 - Anomalies are isolated in time so each has one clean, verifiable explanation.
 - Every `v_attempts` query scans the whole raw table: the view's deduplication window blocks filter pushdown. That is fine at 1M rows. At scale, the deduplicated table should be materialised so time filters cut the scan, and the cost guard would show the difference.
 - The time-filter rule (S07) is best-effort: any predicate on a fact's time column counts. The EXPLAIN cost guard (S12) is the backstop.
+- The offline parser is rules, tuned on the demo and eval questions. Real phrasing variety needs the Claude backend. No live Claude run is part of this commit: no API key was available here. The request shape is unit-tested against a fake client.
+- Merchant-name entity resolution is exact, then unique substring, then a fuzzy "did you mean". Names are not unique across regions; resolution only ever sees the user's scope.
 - The generator favours clarity over realism in places. For example, merchant success-rate noise is centred so the A1 campaign merchant is exactly average, which makes A1 a near-pure mix effect.

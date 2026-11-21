@@ -28,3 +28,9 @@ def test_semantic_layer_reproduces_ground_truth():
 def test_safety_gate_end_to_end():
     from scripts.check_safety import main
     assert main() == 0
+
+
+@pytest.mark.skipif(not _fresh(), reason="run scripts/generate_data.py and scripts/verify_data.py first")
+def test_question_pipeline_end_to_end():
+    from scripts.check_pipeline import main
+    assert main("offline") == 0

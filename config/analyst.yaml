@@ -41,3 +41,33 @@ sql_safety:
   internal_tables: [_data_versions]
   # Advisory: these tables have a cleaner curated view.
   prefer_views: {fact_payment_attempts_raw: v_attempts}
+
+# --------------------------------------------------------------------------- segment 4: LLM pipeline
+llm:
+  # anthropic: Claude via the official SDK (needs ANTHROPIC_API_KEY or an `ant auth login` profile).
+  # offline:   deterministic rule-based backend; no network, used by tests and when no key is set.
+  # auto:      anthropic when credentials are present, otherwise offline.
+  provider: auto
+  model_reasoning: claude-opus-5-5      # SQL generation / repair
+  model_fast: claude-haiku-5-5          # question parsing
+  effort_reasoning: medium
+  effort_fast: low
+  max_tokens: 16000
+  refusal_fallback: default             # server-side fallback on safety refusals (Opus only); null to disable
+  max_json_retries: 2                   # malformed / semantically invalid LLM output -> retry with the error
+  max_sql_repair_attempts: 2            # validator / executor error -> regenerate
+
+defaults:
+  default_time_window_days: 30          # used when a question names no period (always disclosed)
+  default_comparison: previous_period
+  min_segment_volume: 500
+  top_n_drivers: 5
+  max_queries_per_question: 20
+  driver_dimensions: [payment_method, sub_method, issuer_bank, acquirer, merchant_segment, device_type, channel]
+
+ambiguity:
+  mode: ask_when_material               # always_ask | ask_when_material | assume_and_disclose
+  # Ask when interpretations differ by more than this (relative %). Success-rate variants in
+  # this dataset differ by ~6-7% (87.5% vs 93.2%), which is material for a payments business.
+  material_threshold_pct: 5
+  max_clarification_turns: 2

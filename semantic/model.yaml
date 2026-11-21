@@ -96,7 +96,13 @@ entities:
       ambiguous: true    # "settled this month" can mean settlement date or transaction date: disclose / clarify
       columns:
         settlement_date:  {expr: settlements.settlement_date_key, type: date_key, description: Day the money was settled (T+1, weekends roll to Monday)}
-        transaction_date: {expr: attempt.date_key, type: date_key, description: IST day of the underlying payment}
+        transaction_date:
+          expr: attempt.date_key
+          type: date_key
+          description: IST day of the underlying payment
+          # A settlement never precedes its payment, so this bound is exact; it lets the fact be pruned
+          # by its own date and satisfies the time-filter rule (S07).
+          prune: settlements.settlement_date_key >= ?
     joins:
       attempt:          {table: v_attempts,   on: attempt.attempt_id = settlements.attempt_id, description: The underlying payment attempt (one-to-one)}
       merchant:         {table: dim_merchant, on: merchant.merchant_key = settlements.merchant_key}

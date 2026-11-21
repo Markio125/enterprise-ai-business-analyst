@@ -44,6 +44,7 @@ class TimeColumn:
     expr: str
     type: str          # date_key | date
     description: str = ""
+    prune: str | None = None   # extra predicate on the fact's own date, bound to the range start (pushdown)
 
 
 @dataclass(frozen=True)
@@ -215,7 +216,7 @@ class SemanticModel:
                              type=j.get("type", "left"), description=j.get("description", ""))
         return Entity(
             name=name, table=e["table"], grain=e.get("grain", ""), description=e.get("description", "").strip(),
-            time_columns={cn: TimeColumn(cn, c["expr"], c["type"], c.get("description", ""))
+            time_columns={cn: TimeColumn(cn, c["expr"], c["type"], c.get("description", ""), c.get("prune"))
                           for cn, c in t["columns"].items()},
             default_time=t["default"], time_ambiguous=bool(t.get("ambiguous", False)),
             joins=joins, measures={k: str(v) for k, v in (e.get("measures") or {}).items()})
@@ -333,6 +334,9 @@ class SemanticModel:
                 raise SemanticError(f"time range start {lo} is after end {hi}")
             where.append(f"{tcol.expr} BETWEEN ? AND ?")
             params += ([int(lo.strftime('%Y%m%d')), int(hi.strftime('%Y%m%d'))] if tcol.type == "date_key" else [lo, hi])
+            if tcol.prune:
+                where.append(tcol.prune)
+                params.append(int(lo.strftime('%Y%m%d')))
         for f in list(spec.filters) + list(scope or []):
             if f.dimension not in self.dimensions:
                 raise SemanticError(f"filter on unknown dimension {f.dimension!r}")
@@ -426,6 +430,8 @@ class SemanticModel:
                 problems.append(f"entity {en}: default time {ent.default_time!r} not defined")
             for tn, tc in ent.time_columns.items():
                 check_expr(f"{en}.time.{tn}", ent, tc.expr, allowed)
+                if tc.prune:
+                    check_expr(f"{en}.time.{tn}.prune", ent, tc.prune.replace("?", "0"), allowed)
             for jn, j in ent.joins.items():
                 if cols is not None and j.table not in cols:
                     problems.append(f"{en}.joins.{jn}: table {j.table!r} does not exist")

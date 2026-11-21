@@ -108,6 +108,29 @@ def resolve(expression: str, as_of: date) -> TimeRange:
                       f"last {AMBIGUOUS_DEFAULT_DAYS} days (assumed)", ambiguous=True,
                       note=f"{raw!r} is vague; assumed the last {AMBIGUOUS_DEFAULT_DAYS} days ending {as_of}.")
 
+    s = s.replace("–", "-").replace("—", "-")
+    # "oct 18-20" / "18-20 oct" -> explicit range
+    m = re.fullmatch(r"([a-z]+)\.? (\d{1,2})(?:st|nd|rd|th)? ?- ?(\d{1,2})(?:st|nd|rd|th)?(?:,? (\d{4}))?", s) or         re.fullmatch(r"(\d{1,2}) ?- ?(\d{1,2}) ([a-z]+)\.?(?: (\d{4}))?", s)
+    if m:
+        g = m.groups()
+        mon, d1, d2, y = (g[0], g[1], g[2], g[3]) if not g[0].isdigit() else (g[2], g[0], g[1], g[3])
+        if mon in _MONTHS:
+            yy = int(y) if y else as_of.year
+            a, b = date(yy, _MONTHS[mon], int(d1)), date(yy, _MONTHS[mon], int(d2))
+            return tr(a, b, f"{a} to {b}")
+    # "late september", "early oct", "mid-august"
+    m = re.fullmatch(r"(early|mid|late)[ -]([a-z]+)\.?(?: (\d{4}))?", s)
+    if m and m.group(2) in _MONTHS:
+        mon = _MONTHS[m.group(2)]
+        y = int(m.group(3)) if m.group(3) else (as_of.year if mon <= as_of.month else as_of.year - 1)
+        first, last = _month_range(y, mon)
+        a, b = {"early": (first, first.replace(day=10)), "mid": (first.replace(day=11), first.replace(day=20)),
+                "late": (first.replace(day=21), last)}[m.group(1)]
+        return tr(a, b, f"{m.group(1)} {first:%B %Y} ({a} to {b})",
+                  note=f"'{raw}' read as {a}..{b} (early = 1-10, mid = 11-20, late = 21-end).")
+    if s in ("last year", "last 12 months", "last twelve months", "trailing twelve months", "ttm"):
+        return tr(as_of - timedelta(days=364), as_of, "last 365 days",
+                  note=f"'{raw}' read as the rolling 365 days ending {as_of}, not calendar year {as_of.year - 1}.")
     if s in ("today", "so far today"):
         return tr(as_of, as_of, f"{as_of} (latest complete day)",
                   note="'Today' means the latest complete day in the data.")
