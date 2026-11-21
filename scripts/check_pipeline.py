@@ -67,7 +67,7 @@ def main(provider: str | None = "offline") -> int:
     r, turns, sess = run_case(a, "u_exec", ["Why did our payment success rate drop in the last two weeks?"],
                               {"METRIC_DEFINITION:success_rate": "a"})
     p1, p0 = first_value(r, "P1"), first_value(r, "P0")
-    check("EV01 executed after one clarification", r.state == "EXECUTED" and turns == 1, (r.state, turns))
+    check("EV01 executed after one clarification", r.state == "ANALYZED" and turns == 1, (r.state, turns))
     check("EV01 periods match ground truth", r.plan and r.plan.periods == a1["periods"], r.plan and r.plan.periods)
     check("EV01 headline P0/P1 match ground truth",
           p0 is not None and round(p0, 4) == a1["overall"]["sr_p0"] and round(p1, 4) == a1["overall"]["sr_p1"],
@@ -75,24 +75,65 @@ def main(provider: str | None = "offline") -> int:
     dims = {s.dimension for s in r.steps if s.dimension}
     check("EV01 breakdowns include sub_method and payment_method", {"sub_method", "payment_method"} <= dims, dims)
     vol = next((s for s in r.steps if s.dimension == "sub_method" and s.period == "P1"), None)
-    check("EV01 breakdown carries volume for the decomposition", vol is not None and len(vol.columns) == 3,
+    check("EV01 breakdown carries numerator and denominator", vol is not None and len(vol.columns) == 4,
           vol and vol.columns)
+    an = r.analysis
+    dec = an.decomposition("sub_method") if an else None
+    check("EV01 analysis: MIX_DOMINANT, top driver UPI_COLLECT by sub_method",
+          an is not None and an.interpretation_code == a1["interpretation_code"] and an.best_dimension == "sub_method"
+          and an.drivers[0]["segment"] == a1["top_driver"]["segment"],
+          an and (an.interpretation_code, an.best_dimension, an.drivers[:1]))
+    ov = a1["overall"]
+    check("EV01 decomposition totals match ground truth (exact, no residual)",
+          dec is not None and abs(dec.totals["mix_effect_pp"] - ov["mix_effect_pp"]) < 0.001
+          and abs(dec.totals["rate_effect_pp"] - ov["rate_effect_pp"]) < 0.001
+          and abs(dec.overall["delta_pp"] - ov["delta_pp"]) < 0.001 and abs(dec.totals["residual_pp"]) < 1e-9,
+          dec and dec.totals)
+    upi = next((x for x in (dec.segments if dec else []) if x.segment == "UPI_COLLECT"), None)
+    check("EV01 UPI_COLLECT: share up, own rate flat (no 'UPI Collect got worse' claim)",
+          upi is not None and upi.w1 - upi.w0 >= 0.15 and abs(upi.rate_effect_pp) < 0.25
+          and not any(h.code.startswith("RATE_CHANGE") and "UPI_COLLECT" in h.text for h in an.hypotheses),
+          upi and (upi.w0, upi.w1, upi.rate_effect_pp))
+    vd = next((d for d in (an.drilldowns if an else []) if d["kind"] == "VOLUME"), None)
+    want = a1["incremental_upi_collect_top_merchant"]
+    check("EV01 drill-down: QuickBazaar drives the extra UPI collect volume",
+          vd is not None and vd["segments"][0]["segment"] == want["merchant_name"]
+          and vd["segments"][0]["share_of_increase"] >= 0.7, vd and vd["segments"][:1])
+    h = next((x for x in (an.hypotheses if an else []) if x.code == "MIX_SHIFT"), None)
+    rc = next((x for x in (an.recommendations if an else []) if h and x.follows_from == h.id), None)
+    check("EV01 hypothesis MIX_SHIFT + recommendation citing it with an impact estimate",
+          h is not None and h.confidence == "HIGH" and rc is not None and rc.expected_impact_pp
+          and abs(rc.expected_impact_pp + upi.mix_effect_pp) < 1e-9, rc)
+    ids = {x.check_id for x in (an.dq if an else [])}
+    check("EV01 data-quality caveats: Oct 5 duplicates handled, Oct 28 excluded",
+          {"DQ01_DUPLICATES", "DQ05_LATE_ARRIVING"} <= ids, ids)
 
     # EV15: follow-up drill-down inherits metric, periods and adds the filter
     r2 = a.ask("Drill into UPI Collect by merchant", "u_exec", sess)
-    check("EV15 follow-up inherits periods and metric", r2.state == "EXECUTED" and r2.plan.periods == a1["periods"]
+    check("EV15 follow-up inherits periods and metric", r2.state == "ANALYZED" and r2.plan.periods == a1["periods"]
           and r2.metrics == r.metrics, (r2.state, r2.plan and r2.plan.periods))
     check("EV15 adds the UPI_COLLECT filter and merchant breakdown",
           {"dimension": "sub_method", "op": "=", "values": ["UPI_COLLECT"]} in r2.intent.filters
           and "merchant" in {s.dimension for s in r2.steps}, r2.intent.filters)
+    vs = r2.analysis.volume_shift if r2.analysis else []
+    check("EV15 drill-down: QuickBazaar is the segment whose share jumped",
+          bool(vs) and vs[0]["segment"] == a1["incremental_upi_collect_top_merchant"]["merchant_name"], vs[:1])
 
     # A2 / EV02: issuer outage question routes to a driver analysis including issuer_bank
     a2 = truth["A2_issuer_outage"]
     r, _, _ = run_case(a, "u_exec", [a2["question"]], {})
     check("EV02 card question: CARD filter, issuer breakdown, single day",
-          r.state == "EXECUTED" and r.window.start.isoformat() == a2["date"]
+          r.state == "ANALYZED" and r.window.start.isoformat() == a2["date"]
           and {"dimension": "payment_method", "op": "=", "values": ["CARD"]} in r.intent.filters
           and "issuer_bank" in {s.dimension for s in r.steps}, (r.state, r.window and r.window.label))
+    an = r.analysis
+    hw = an.hour_window if an else None
+    check("EV02 analysis: Meridian Bank outage, 18:00-23:00, code 91",
+          an is not None and an.drivers[0]["segment"] == a2["issuer"]["bank_name"]
+          and hw is not None and f"{hw['start_hour']:02d}:00-{hw['end_hour']:02d}:00" == a2["window_ist"]
+          and an.failure_codes and an.failure_codes["top_code"] == a2["top_card_response_code"]
+          and any(x.code == "ISSUER_OUTAGE" for x in an.hypotheses),
+          an and (an.drivers[:1], hw, an.failure_codes and an.failure_codes["top_code"]))
 
     # EV03: restricted metric
     r, _, _ = run_case(a, "u_ops", ["Show me MDR revenue by merchant last month"])
@@ -124,15 +165,28 @@ def main(provider: str | None = "offline") -> int:
     r, _, _ = run_case(a, "u_exec", ["How many transactions did we process on October 5?"], {})
     check("EV07 Oct 5 count = deduplicated rows", first_value(r) == truth["A4_duplicates"]["eval_EV07_transactions_on_date"],
           first_value(r))
+    check("EV07 duplicate caveat (DQ01) with dedup mitigation",
+          r.analysis is not None and any(x.check_id == "DQ01_DUPLICATES" and x.auto_mitigation == "USED_DEDUP_VIEW"
+                                         for x in r.analysis.dq), r.analysis and [x.check_id for x in r.analysis.dq])
 
     # EV08: reconciliation pulls every source the finance user may see
     a6 = truth["A6_source_disagreement"]
     r, _, _ = run_case(a, "u_fin", ["Why does finance's settled amount for October differ from the dashboard?"], {})
-    vals = {s.purpose: (round(float(s.rows[0][0]), 2) if s.rows else None) for s in r.steps}
+    vals = {s.purpose: (round(float(s.rows[0][0]), 2) if s.rows else None) for s in r.steps if s.role == "reconcile"}
     check("EV08 dashboard GMV and finance gross match ground truth",
           a6["dashboard_gmv_inr"] in vals.values() and a6["finance_gross_inr"] in vals.values(), vals)
     check("EV08 settled amount by transaction day matches ground truth",
           a6["fact_settlements_settled_ist_inr"] in vals.values(), vals)
+    rec = r.analysis.reconciliation if r.analysis else None
+    got = {f["factor"]: f["amount_inr"] for f in (rec["explained"] if rec else [])}
+    tmap = {"REVERSED_EXCLUDED_IN_FINANCE": "REVERSED_excluded", "TIMEZONE_DAY_BOUNDARY": "timezone_IST_vs_UTC_day",
+            "SETTLEMENT_FAILED_EXCLUDED": "settlement_FAILED_excluded", "ON_HOLD_EXCLUDED": "ON_HOLD_excluded",
+            "MERCHANTS_MISSING_IN_FINANCE": "merchants_missing_in_finance"}
+    check("EV08 reconciliation factors match ground truth to the paisa (incl. timezone, reversed)",
+          rec is not None and all(abs(got.get(k, 0) - a6["explained_by_inr"][v]) < 0.01 for k, v in tmap.items()),
+          got)
+    check("EV08 reconciliation fully explained (|residual| < INR 1) + recommendation",
+          rec is not None and abs(rec["residual_inr"]) < 1 and rec["recommendation"], rec and rec["residual_inr"])
 
     # EV09 / EV10: vague time asks; definition ambiguity asks or is disclosed
     r, _, _ = run_case(a, "u_exec", ["How is success rate trending lately?"])
@@ -142,14 +196,19 @@ def main(provider: str | None = "offline") -> int:
     check("EV10 bare 'success rate' -> definition clarification", r.state == "AWAITING_CLARIFICATION"
           and r.ambiguity.items[0].type == "METRIC_DEFINITION", r.state)
     r, _, _ = run_case(a, "u_exec", ["What's our success rate?"], {})
-    check("EV10 default window is disclosed", r.state == "EXECUTED" and any("No period given" in d or "default" in d
+    check("EV10 default window is disclosed", r.state == "ANALYZED" and any("No period given" in d or "default" in d
                                                                             for d in r.disclosures + [r.window.label]),
           r.disclosures)
 
     # EV11: as-of excludes the incomplete day
     r, _, _ = run_case(a, "u_exec", ["Did success rate drop yesterday?"], {})
-    check("EV11 'yesterday' resolves against the last complete day", r.state == "EXECUTED"
+    check("EV11 'yesterday' resolves against the last complete day", r.state == "ANALYZED"
           and r.window.end.isoformat() < truth["A7_late_data"]["date"], r.window and r.window.label)
+    an = r.analysis
+    check("EV11 no significant drop claimed; late-arriving caveat present",
+          an is not None and not an.headline.get("significant")
+          and any(x.code == "PREMISE_NOT_SUPPORTED" for x in an.hypotheses)
+          and any(x.check_id == "DQ05_LATE_ARRIVING" for x in an.dq), an and an.headline)
 
     # EV12: too many rows -> narrowing with options; choosing them leads to a runnable plan
     q12 = "Show hourly success rate for every merchant for the past year"
@@ -157,7 +216,7 @@ def main(provider: str | None = "offline") -> int:
     check("EV12 hourly x merchant x year -> AWAITING_NARROWING with options",
           r.state == "AWAITING_NARROWING" and len(r.narrowing["options"]) >= 2, r.state)
     r, _, _ = run_case(a, "u_exec", [q12], {}, narrowing=["c", "a"])
-    check("EV12 narrowed to top merchants + weekly -> executed", r.state == "EXECUTED", (r.state, r.message[:80]))
+    check("EV12 narrowed to top merchants + weekly -> executed", r.state == "ANALYZED", (r.state, r.message[:80]))
 
     # EV13: null merchant keys show up as their own bucket
     r, _, _ = run_case(a, "u_exec", ["GMV by merchant segment for Oct 18-20"], {})
@@ -165,12 +224,21 @@ def main(provider: str | None = "offline") -> int:
     got = {(row[0] or "UNKNOWN"): round(row[1], 2) for row in seg.rows} if seg else {}
     check("EV13 GMV by segment incl. unmapped bucket matches ground truth",
           got == truth["A5_null_merchant"]["eval_EV13_gmv_by_segment"], got)
+    check("EV13 null-merchant caveat (DQ02) present", r.analysis is not None and any(
+        x.check_id == "DQ02_NULL_KEYS" for x in r.analysis.dq), r.analysis and [x.check_id for x in r.analysis.dq])
 
     # EV14: acquirer driver question
     r, _, _ = run_case(a, "u_exec", [truth["A3_acquirer_degradation"]["question"]], {})
-    check("EV14 CNP filter + acquirer breakdown, late September", r.state == "EXECUTED"
+    check("EV14 CNP filter + acquirer breakdown, late September", r.state == "ANALYZED"
           and {"dimension": "flow", "op": "=", "values": ["CARD_NOT_PRESENT"]} in r.intent.filters
           and "acquirer" in {s.dimension for s in r.steps} and r.window.start.month == 9, r.state)
+    an = r.analysis
+    hyp = next((x for x in (an.hypotheses if an else []) if x.code == "ACQUIRER_DEGRADATION"), None)
+    check("EV14 analysis: Acquirer Beta, timeouts, routing recommendation",
+          an is not None and an.drivers[0]["dimension"] == "acquirer" and an.drivers[0]["segment"] == "Acquirer Beta"
+          and hyp is not None and "timeout" in hyp.text.lower()
+          and any(x.follows_from == hyp.id and "routing" in x.text.lower() for x in an.recommendations),
+          an and (an.drivers[:1], [x.code for x in an.hypotheses]))
 
     # unknown metric / off-topic
     r, _, _ = run_case(a, "u_exec", ["What is our NPS?"])

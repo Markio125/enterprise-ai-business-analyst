@@ -1,13 +1,14 @@
-"""The question pipeline (SPEC section 7), up to executed query results.
+"""The question pipeline (SPEC section 7), up to an analysed result.
 
 RECEIVED -> PARSING -> (REJECTED_UNSAFE | ANSWERED_DIRECT)
          -> ACCESS_PRECHECK -> (REFUSED_ACCESS)
          -> AMBIGUITY_CHECK -> (AWAITING_CLARIFICATION)
          -> PLANNING -> (AWAITING_NARROWING)
-         -> SQL_GENERATION / VALIDATION / EXECUTION (repair loop) -> EXECUTED
+         -> SQL_GENERATION / VALIDATION / EXECUTION (repair loop)
+         -> DQ_CHECK + ANALYSIS (drill-downs run through the same gate) -> ANALYZED | ANSWERED_WITH_DQ_BLOCK
 
-EXECUTED is the hand-off point to the analysis engine (segment 5) and the answer
-composer (segment 6), which add ANALYSIS, COMPOSITION and the ANSWERED* states.
+ANALYZED is the hand-off point to the answer composer (segment 6), which adds
+COMPOSITION, the grounding check and the final ANSWERED* states.
 Every stage appends to `trace` (stage, status, latency, tokens) for the
 "show steps" panel and the run_steps table (segment 7).
 """
@@ -17,18 +18,20 @@ import time
 from dataclasses import dataclass, field
 from datetime import date
 
+from .analysis import AnalysisResult, Analyzer
 from .ambiguity import AmbiguityDetector, AmbiguityReport, apply_choices, resolve_merchants
 from .catalog import build_catalog, render_markdown
+from .dq import DataQuality
 from .executor import QueryGateway
 from .intent import INTENT_SCHEMA, PARSE_RULES, Intent, normalize, offline_parse
 from .llm import LLM, LLMError, make_llm
-from .planner import Plan, Planner, default_window
+from .planner import Plan, Planner, Step, default_window
 from .policies import AccessDenied, Authorization, Principal
 from .semantic import Filter, QuerySpec
 from .sqlgen import SqlGenerator
 from .timeparse import TimeParseError, TimeRange, detect_as_of, resolve
 
-TERMINAL = {"EXECUTED", "ANSWERED_DIRECT", "REFUSED_ACCESS", "REJECTED_UNSAFE", "FAILED"}
+TERMINAL = {"ANALYZED", "ANSWERED_WITH_DQ_BLOCK", "ANSWERED_DIRECT", "REFUSED_ACCESS", "REJECTED_UNSAFE", "FAILED"}
 WAITING = {"AWAITING_CLARIFICATION", "AWAITING_NARROWING"}
 
 
@@ -54,6 +57,7 @@ class StepResult:
     status: str
     period: str | None = None
     dimension: str | None = None
+    role: str | None = None
     sql: str | None = None
     columns: list[dict] = field(default_factory=list)
     rows: list[list] = field(default_factory=list)
@@ -95,6 +99,7 @@ class PipelineResult:
     disclosures: list[str] = field(default_factory=list)
     trace: list[dict] = field(default_factory=list)
     llm: str = ""
+    analysis: AnalysisResult | None = None
 
     def step(self, sid: str) -> StepResult | None:
         return next((s for s in self.steps if s.step_id == sid), None)
@@ -112,6 +117,7 @@ class PipelineResult:
             "steps": [s.as_dict(max_rows) for s in self.steps],
             "refusal": self.refusal, "narrowing": self.narrowing,
             "disclosures": self.disclosures, "trace": self.trace,
+            "analysis": self.analysis.as_dict() if self.analysis else None,
         }
 
 
@@ -132,6 +138,8 @@ class Analyst:
             self.as_of, self.as_of_evidence = date.fromisoformat(str(cfg["as_of_override"])), {"rule": "override"}
         else:
             self.as_of, self.as_of_evidence = detect_as_of(con, float(cfg.get("completeness_ratio", 0.85)))
+        self.dq = DataQuality(con, self.settings, self.as_of, self.as_of_evidence, self.gateway.executor.data_version)
+        self.analyzer = Analyzer(self.model, self.settings, self.dq)
         lo = con.execute("SELECT MIN(date_key) FROM v_attempts").fetchone()[0]
         self.data_start = date(lo // 10000, lo // 100 % 100, lo % 100)
         self._catalogs: dict[str, dict] = {}
@@ -389,6 +397,40 @@ class Analyst:
         failed = [s for s in res.steps if s.status not in ("OK", "TRUNCATED")]
         if failed and len(failed) == len(res.steps):
             return self._end(res, "FAILED", failed[0].error or "All queries failed.", trace)
+        n_planned = len(res.steps)
+
+        # DQ_CHECK + ANALYSIS: extra queries (drill-downs, reconciliation tests) go through the gate as the user
+        t0 = time.perf_counter()
+
+        def run(spec, purpose, period=None, dimension=None):
+            st = Step(f"x{len(res.steps) - n_planned + 1}", "QUERY", purpose, spec, period=period,
+                      dimension=dimension, role="drilldown")
+            sr = self._run_step(st, p, cat, window, trace)
+            res.steps.append(sr)
+            return sr
+
+        def run_sql(sql, purpose):
+            r = self.gateway.run_sql(sql, p)
+            sr = StepResult(f"x{len(res.steps) - n_planned + 1}", purpose, "ERROR", role="reconcile_test")
+            v = r.validation
+            sr.sql = (v.rewritten_sql if v and v.rewritten_sql else sql)
+            sr.rls = list(v.rls_predicates_applied) if v else []
+            if v is not None and not v.ok:
+                sr.error = v.user_message()
+            else:
+                self._fill(sr, r)
+            res.steps.append(sr)
+            return sr
+
+        try:
+            res.analysis = self.analyzer.analyze(res, plan, run, run_sql, p)
+            a = res.analysis
+            trace("ANALYSIS", "OK", {"interpretation": a.interpretation_code, "drivers": len(a.drivers),
+                                     "drilldowns": len(a.drilldowns), "dq": [r.check_id for r in a.dq],
+                                     "extra_queries": len(res.steps) - n_planned}, t0)
+        except Exception as e:  # noqa: BLE001 - the executed results are still worth returning
+            trace("ANALYSIS", "ERROR", {"error": f"{type(e).__name__}: {e}"}, t0)
+            res.disclosures.append("The automated analysis failed; only the raw query results are available.")
         seen = set(res.disclosures)
         for s in res.steps:
             for d in s.disclosures:
@@ -399,7 +441,11 @@ class Analyst:
         msg = f"Ran {len(res.steps)} quer{'y' if len(res.steps) == 1 else 'ies'} for {window.label}."
         if failed:
             msg += f" {len(failed)} failed: " + "; ".join(f"{s.step_id} {s.error}" for s in failed)
-        return self._end(res, "EXECUTED", msg, trace)
+        if res.analysis and res.analysis.dq_block:
+            blk = next(r for r in res.analysis.dq if r.severity == "BLOCK")
+            return self._end(res, "ANSWERED_WITH_DQ_BLOCK", "I can't give a reliable answer for "
+                             f"{window.label}: {blk.impact}", trace)
+        return self._end(res, "ANALYZED", msg, trace)
 
     def _apply_narrowing(self, intent: Intent, changes: list[dict], res: PipelineResult) -> dict | None:
         top = None
@@ -422,7 +468,7 @@ class Analyst:
         return [row[0] for row in r.rows if row[0] is not None] if r.ok else []
 
     def _run_step(self, step, p: Principal, cat: dict, window: TimeRange, trace) -> StepResult:
-        sr = StepResult(step.id, step.purpose, "ERROR", step.period, step.dimension)
+        sr = StepResult(step.id, step.purpose, "ERROR", step.period, step.dimension, step.role)
         if step.kind == "QUERY":
             try:
                 r = self.gateway.run_spec(step.spec, p)

@@ -39,8 +39,27 @@ def show(r: PipelineResult, verbose: bool) -> None:
         print(f"  metrics: {', '.join(r.metrics)}")
     for d in r.disclosures:
         print(f"  * {d}")
+    a = r.analysis
+    if a:
+        h = a.headline or {}
+        if h.get("P0") is not None and h.get("delta_pp") is not None:
+            print(f"\n  headline: {h['P0']:.2%} -> {h['P1']:.2%} ({h['delta_pp']:+.2f}pp, "
+                  f"{'significant' if h.get('significant') else 'not significant'})")
+        if a.interpretation_code:
+            print(f"  interpretation: {a.interpretation_code} (best split: {a.best_dimension})")
+        for d in a.drivers[:3]:
+            print(f"  driver: {d['dimension']} = {d['segment']}  {d['contribution']:+.2f} "
+                  f"({d['share_of_change']:.0%} of change; mix {d.get('mix_effect_pp') or 0:+.2f}, "
+                  f"rate {d.get('rate_effect_pp') or 0:+.2f})")
+        for x in a.hypotheses:
+            print(f"  {x.id} [{x.code}, {x.confidence}] {x.text}")
+        for x in a.recommendations:
+            imp = f" (~{x.expected_impact_pp:+.2f}pp)" if x.expected_impact_pp else ""
+            print(f"  {x.id} <- {x.follows_from}: {x.text}{imp}")
+        for c in a.caveats:
+            print(f"  caveat: {c}")
     import pandas as pd
-    for s in r.steps:
+    for s in r.steps if verbose else []:
         print(f"\n  {s.step_id} {s.purpose}  [{s.status}, {s.row_count} rows, {s.duration_ms} ms]")
         if s.error:
             print(f"     error: {s.error}")
@@ -76,7 +95,7 @@ def main() -> int:
             print(json.dumps(r.as_dict(), indent=2, default=str))
         else:
             show(r, a.verbose)
-        return 0 if r.state in ("EXECUTED", "ANSWERED_DIRECT") else 1
+        return 0 if r.state in ("ANALYZED", "ANSWERED_DIRECT") else 1
     question = a.question
     while True:
         if not question:

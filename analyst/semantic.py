@@ -118,10 +118,12 @@ class ResolvedMetric:
     metric: Metric
     variant: MetricVariant
     sql: str
+    part: str | None = None      # "num" / "den" of a ratio metric (for decompositions and significance tests)
 
     @property
     def ref(self) -> str:
-        return self.metric.name if not self.metric.has_variants else f"{self.metric.name}:{self.variant.name}"
+        base = self.metric.name if not self.metric.has_variants else f"{self.metric.name}:{self.variant.name}"
+        return base + (f"#{self.part}" if self.part else "")
 
     @property
     def entity(self) -> str:
@@ -129,7 +131,7 @@ class ResolvedMetric:
 
     @property
     def disclosure(self) -> str | None:
-        if not self.metric.has_variants:
+        if not self.metric.has_variants or self.part:
             return None
         return f"{self.metric.name} = {self.variant.name}: {self.variant.description}"
 
@@ -250,6 +252,7 @@ class SemanticModel:
 
     # ---------------------------------------------------------------- resolution
     def resolve_metric(self, ref: str) -> ResolvedMetric:
+        ref, _, part = ref.partition("#")
         name, _, variant = ref.partition(":")
         m = self.metrics.get(name)
         if m is None:
@@ -265,7 +268,17 @@ class SemanticModel:
             if key not in ent.measures:
                 raise SemanticError(f"metric {ref!r}: measure {key!r} not defined on entity {ent.name!r}")
             return f"({ent.measures[key]})"
+        if part:
+            parts = ratio_parts(v.sql)
+            if parts is None or part not in ("num", "den"):
+                raise SemanticError(f"metric {ref!r} has no part {part!r} (only ratio metrics have #num / #den)")
+            return ResolvedMetric(m, v, _PLACEHOLDER.sub(sub, parts[part]), part)
         return ResolvedMetric(m, v, _PLACEHOLDER.sub(sub, v.sql))
+
+    def is_ratio(self, ref: str) -> bool:
+        name, _, variant = ref.partition("#")[0].partition(":")
+        m = self.metrics.get(name)
+        return m is not None and ratio_parts(m.variants[variant or m.default_variant].sql) is not None
 
     def dimension(self, name: str) -> Dimension:
         if name not in self.dimensions:
@@ -510,7 +523,22 @@ class SemanticModel:
 
 # --------------------------------------------------------------------------- helpers
 def _col_name(r: ResolvedMetric) -> str:
-    return r.ref.replace(":", "__")
+    return r.ref.replace(":", "__").replace("#", "__")
+
+
+_RATIO = re.compile(r"^\{(\w+)\}\s*\*\s*1\.0\s*/\s*NULLIF\(\{(\w+)\},\s*0\)$")
+
+
+def ratio_parts(sql: str) -> dict[str, str] | None:
+    """Numerator / denominator templates of a ratio metric, so a rate can be decomposed exactly.
+    `1 - (a / b)` (complement metrics) has numerator b - a."""
+    s = sql.strip()
+    neg = s.startswith("1 - (") and s.endswith(")")
+    m = _RATIO.match(s[5:-1].strip() if neg else s)
+    if not m:
+        return None
+    a, b = "{" + m.group(1) + "}", "{" + m.group(2) + "}"
+    return {"num": f"({b} - {a})" if neg else a, "den": b}
 
 
 def _join_order(ent: Entity, needed: set[str]) -> list[str]:

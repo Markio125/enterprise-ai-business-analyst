@@ -104,13 +104,13 @@ def test_material_definition_ambiguity_asks_with_probe_values(analyst):
     assert item.key == "METRIC_DEFINITION:success_rate" and len(item.options) >= 3
     assert all(o.estimated_value is not None for o in item.options) and item.materiality_pct > 5
     r = analyst.ask("What's our success rate last week?", "u_exec", s, {item.key: "b"})
-    assert r.state == "EXECUTED" and r.metrics == ["success_rate:attempt_level_all"]
+    assert r.state == "ANALYZED" and r.metrics == ["success_rate:attempt_level_all"]
     assert any("your choice" in d for d in r.disclosures)
 
 
 def test_explicit_variant_needs_no_clarification(analyst):
     r = analyst.ask("What was the order-level success rate last week?", "u_exec")
-    assert r.state == "EXECUTED" and r.metrics == ["success_rate:order_level"]
+    assert r.state == "ANALYZED" and r.metrics == ["success_rate:order_level"]
 
 
 def test_assume_and_disclose_mode(gateway):
@@ -119,7 +119,7 @@ def test_assume_and_disclose_mode(gateway):
     a = Analyst(gateway=gateway, llm=OfflineLLM(OFFLINE_HANDLERS))
     a.detector.mode = "assume_and_disclose"
     r = a.ask("What's our success rate last week?", "u_exec")
-    assert r.state == "EXECUTED" and r.metrics == ["success_rate:attempt_level_excl_user_cancel"]
+    assert r.state == "ANALYZED" and r.metrics == ["success_rate:attempt_level_excl_user_cancel"]
     assert any("assumed" in d and "Alternatives" in d for d in r.disclosures)
 
 
@@ -129,7 +129,7 @@ def test_vague_time_asks_then_uses_the_choice(analyst):
     r = analyst.ask(q, "u_exec", s)
     assert r.state == "AWAITING_CLARIFICATION" and r.ambiguity.items[0].type == "TIME_WINDOW"
     r = analyst.ask(q, "u_exec", s, {"TIME_WINDOW:time period": "a"})
-    assert r.state == "EXECUTED" and r.window.days == 7
+    assert r.state == "ANALYZED" and r.window.days == 7
     assert r.steps[0].row_count == 7          # daily trend over 7 days
 
 
@@ -138,27 +138,26 @@ def test_ambiguous_business_word_with_different_units_asks(analyst):
     assert r.state == "AWAITING_CLARIFICATION" and r.ambiguity.items[0].field == "revenue"
     # for a role that can only see one reading it is not ambiguous
     r = analyst.ask("What was revenue last month?", "u_ops")
-    assert r.state == "EXECUTED" and r.metrics == ["gmv_inr"]
+    assert r.state == "ANALYZED" and r.metrics == ["gmv_inr"]
 
 
 def test_clarification_limit_falls_back_to_defaults(analyst):
     s = Session("u_exec", clarification_turns=2)
     s.pending_question = "What's our success rate last week?"
     r = analyst.ask("What's our success rate last week?", "u_exec", s)
-    assert r.state == "EXECUTED" and any("clarification limit" in d for d in r.disclosures)
+    assert r.state == "ANALYZED" and any("clarification limit" in d for d in r.disclosures)
 
 
 # ----------------------------------------------------------------------------- planning
-def test_driver_plan_has_both_periods_volume_and_deferred_compute(analyst):
+def test_driver_plan_has_both_periods_parts_and_compute_steps(analyst):
     s = Session("u_exec", clarifications={"METRIC_DEFINITION:success_rate": "a"})
     r = analyst.ask("Why did success rate drop in the last two weeks?", "u_exec", s)
-    assert r.state == "EXECUTED"
+    assert r.state == "ANALYZED"
     assert r.plan.periods == {"P1": ["2026-10-14", "2026-10-27"], "P0": ["2026-09-30", "2026-10-13"]}
     kinds = [x.kind for x in r.plan.steps]
     assert "COMPUTE" in kinds and "DQ_CHECK" in kinds
-    assert all(x.deferred for x in r.plan.steps if x.kind in ("COMPUTE", "DQ_CHECK"))
-    by_dim = [x for x in r.steps if x.dimension]
-    assert by_dim and all(len(x.columns) == 3 for x in by_dim)       # dimension, rate, volume
+    by_dim = [x for x in r.steps if x.dimension and x.role == "breakdown"]
+    assert by_dim and all(len(x.columns) == 4 for x in by_dim)       # dimension, rate, numerator, denominator
     assert len(r.plan.query_steps()) <= analyst.planner.max_queries
 
 
@@ -166,7 +165,7 @@ def test_follow_up_inherits_context(analyst):
     s = Session("u_exec", clarifications={"METRIC_DEFINITION:success_rate": "a"})
     first = analyst.ask("Why did success rate drop in the last two weeks?", "u_exec", s)
     r = analyst.ask("Drill into UPI Collect by merchant", "u_exec", s)
-    assert r.state == "EXECUTED" and r.intent.is_follow_up
+    assert r.state == "ANALYZED" and r.intent.is_follow_up
     assert r.plan.periods == first.plan.periods and r.metrics == first.metrics
     assert {"dimension": "sub_method", "op": "=", "values": ["UPI_COLLECT"]} in r.intent.filters
     assert "payment_method" not in {x.dimension for x in r.steps}     # implied by the sub_method filter
@@ -180,12 +179,12 @@ def test_result_size_guard_and_narrowing(analyst):
     assert r.narrowing["estimated_rows"] > analyst.planner.max_rows and not r.steps
     r = analyst.ask(q, "u_exec", s, {"NARROWING": "c"})
     r = analyst.ask(q, "u_exec", s, {"NARROWING": "a"}) if r.state == "AWAITING_NARROWING" else r
-    assert r.state == "EXECUTED" and r.steps[0].row_count <= analyst.planner.max_rows
+    assert r.state == "ANALYZED" and r.steps[0].row_count <= analyst.planner.max_rows
 
 
 def test_ranking_respects_scope_and_limit(analyst):
     r = analyst.ask("Top 5 merchants by GMV last month", "u_west")
-    assert r.state == "EXECUTED" and r.steps[0].row_count == 5 and r.steps[0].rls
+    assert r.state == "ANALYZED" and r.steps[0].row_count == 5 and r.steps[0].rls
     vals = [row[1] for row in r.steps[0].rows]
     assert vals == sorted(vals, reverse=True)
 
@@ -197,7 +196,7 @@ def test_invalid_names_are_sent_back_then_accepted(gateway):
         intent(metrics=[{"term": "gmv", "metric": "gmv_inr", "variant": None}]),
     ])
     r = a.ask("gmv last 7 days", "u_exec")
-    assert r.state == "EXECUTED" and r.metrics == ["gmv_inr"]
+    assert r.state == "ANALYZED" and r.metrics == ["gmv_inr"]
     parse_calls = [c for c in llm.calls if c["task"] == "parse"]
     assert len(parse_calls) == 2 and "success_ratio" in parse_calls[1]["user"]
     assert [t["status"] for t in r.trace if t["stage"] == "PARSING"] == ["RETRY", "OK"]
@@ -220,7 +219,7 @@ def test_sql_repair_loop_fixes_a_hallucinated_column(gateway):
                             "tables_used": ["v_attempts"], "metrics_used": [], "assumptions": ["IST days"],
                             "expected_columns": ["attempts_per_order"]}])
     r = a.ask("average attempts per order last 7 days", "u_exec")
-    assert r.state == "EXECUTED"
+    assert r.state == "ANALYZED"
     st = r.steps[0]
     assert [x["status"] for x in st.attempts] == ["FAIL_REPAIRABLE", "OK"] and st.rows[0][0] > 1
     sql_calls = [c for c in llm.calls if c["task"] == "sql"]
@@ -261,7 +260,7 @@ def test_scoped_user_custom_sql_gets_rls(gateway):
                           "tables_used": ["v_attempts"], "metrics_used": [], "assumptions": [],
                           "expected_columns": []}])
     r = a.ask("count attempts", "u_west")
-    assert r.state == "EXECUTED" and any("WEST" in x for x in r.steps[0].rls)
+    assert r.state == "ANALYZED" and any("WEST" in x for x in r.steps[0].rls)
 
 
 def test_offline_backend_refuses_custom_sql(analyst, gateway):

@@ -38,11 +38,12 @@ class Step:
     method: str | None = None         # COMPUTE steps
     inputs: list[str] = field(default_factory=list)
     dimension: str | None = None
-    deferred: bool = False            # executed in a later segment
+    role: str | None = None           # headline | trend | breakdown | ranking | reconcile | custom
+    deferred: bool = False            # not executed (kept for plans that declare optional steps)
 
     def as_dict(self) -> dict:
         d = {"id": self.id, "kind": self.kind, "purpose": self.purpose, "period": self.period,
-             "deferred": self.deferred}
+             "role": self.role}
         if self.spec:
             s = self.spec
             d["spec"] = {"metrics": s.metrics, "dimensions": s.dimensions,
@@ -133,28 +134,29 @@ class Planner:
         def headline(tr, period, purpose):
             for ent, ms in by_entity.items():
                 steps.append(Step(sid(), "QUERY", purpose + (f" ({ent})" if len(by_entity) > 1 else ""),
-                                  spec(ms, tr=tr), period=period))
+                                  spec(self.with_parts(ms), tr=tr), period=period, role="headline"))
 
         grain = intent.grain if intent.grain != "none" else ("day" if window.days <= 92 else "week")
 
         if intent.custom_request:
-            steps.append(Step(sid(), "SQL", intent.custom_request, request=intent.custom_request, period="P1"))
+            steps.append(Step(sid(), "SQL", intent.custom_request, request=intent.custom_request, period="P1",
+                              role="custom"))
         elif qt == "RECONCILIATION":
             for r in refs:
                 ent = self.model.entities[self._entity(r)]
                 bases = list(ent.time_columns) if ent.time_ambiguous else [None]
                 for b in bases:
                     steps.append(Step(sid(), "QUERY", f"{r} over the period" + (f" by {b}" if b else ""),
-                                      spec([r], basis=b), period="P1"))
+                                      spec([r], basis=b), period="P1", role="reconcile"))
             steps.append(Step(sid(), "COMPUTE", "Attribute the gap between sources", method="RECONCILE",
-                              inputs=[s.id for s in steps], deferred=True))
+                              inputs=[s.id for s in steps]))
         elif qt == "DRIVER_ANALYSIS":
             headline(window, "P1", "Headline metric, focus period")
             if baseline:
                 headline(baseline, "P0", "Headline metric, baseline period")
             span = TimeRange(baseline.start if baseline else window.start, window.end, "trend", "")
             steps.append(Step(sid(), "QUERY", f"{grain.title()} trend for the chart",
-                              spec([primary], TIME_DIMS["day" if span.days <= 92 else "week"], tr=span)))
+                              spec([primary], TIME_DIMS["day" if span.days <= 92 else "week"], tr=span), role="trend"))
             filtered = {f.dimension for f in filters if f.op in ("=",)}
             filtered |= {parent for f in filtered for parent in IMPLIES.get(f, ())}
             cands = dims + [d for d in self.d.get("driver_dimensions", []) if d not in dims]
@@ -168,23 +170,25 @@ class Planner:
                     if tr is None:
                         continue
                     s = Step(sid(), "QUERY", f"{primary} by {d}, {'focus' if p == 'P1' else 'baseline'} period",
-                             spec([primary, *self._volume_refs(primary)], [d], tr=tr), period=p, dimension=d)
+                             spec(self.with_parts([primary]), [d], tr=tr), period=p, dimension=d, role="breakdown")
                     steps.append(s)
                     ids.append(s.id)
                 steps.append(Step(sid(), "COMPUTE", f"Mix vs rate decomposition by {d}",
-                                  method="MIX_RATE_DECOMPOSITION", inputs=ids, dimension=d, deferred=True))
+                                  method="MIX_RATE_DECOMPOSITION" if self.model.is_ratio(primary)
+                                  else "CONTRIBUTION", inputs=ids, dimension=d))
             if len(chosen) < len(cands):
                 notes.append(f"Query budget reached; not analysed: {', '.join(cands[len(chosen):])}.")
-            steps.append(Step(sid(), "COMPUTE", "Rank drivers", method="RANK_DRIVERS", deferred=True,
-                              inputs=[s.id for s in steps if s.method == "MIX_RATE_DECOMPOSITION"]))
-            steps.append(Step(sid(), "DQ_CHECK", "Data quality over the analysed window", deferred=True))
+            steps.append(Step(sid(), "COMPUTE", "Rank drivers, drill into the top one", method="RANK_DRIVERS",
+                              inputs=[s.id for s in steps if s.method in ("MIX_RATE_DECOMPOSITION", "CONTRIBUTION")]))
+            steps.append(Step(sid(), "DQ_CHECK", "Data quality over the analysed window"))
             return Plan(uuid.uuid4().hex[:12], f"Explain the change in {primary}", qt, refs, periods, steps,
                         cands, notes + intent.notes)
         elif qt == "TREND":
             tdims = TIME_DIMS[grain] + [d for d in dims if d not in TIME_DIMS[grain]]
             for ent, ms in by_entity.items():
                 steps.append(Step(sid(), "QUERY", f"{', '.join(ms)} by {grain}" +
-                                  (f" and {', '.join(dims)}" if dims else ""), spec(ms, tdims), period="P1"))
+                                  (f" and {', '.join(dims)}" if dims else ""), spec(ms, tdims), period="P1",
+                                  role="trend"))
         elif qt == "RANKING" and dims:
             r = intent.ranking or {}
             rm = r.get("metric") if r.get("metric") in {x.partition(":")[0] for x in refs} else None
@@ -194,11 +198,11 @@ class Planner:
             ent_refs = by_entity[self._entity(order_ref)]
             steps.append(Step(sid(), "QUERY", f"{'Top' if desc else 'Bottom'} {limit} {dims[0]} by {order_ref}",
                               spec(ent_refs, dims, order=[(order_ref.partition(":")[0], desc)], limit=limit),
-                              period="P1"))
+                              period="P1", role="ranking"))
             if baseline:
                 steps.append(Step(sid(), "QUERY", "Same ranking, baseline period",
                                   spec(ent_refs, dims, tr=baseline, order=[(order_ref.partition(":")[0], desc)],
-                                       limit=limit), period="P0"))
+                                       limit=limit), period="P0", role="ranking"))
         else:   # LOOKUP, DISTRIBUTION, COMPARISON
             headline(window, "P1", "Headline metric")
             if baseline:
@@ -206,21 +210,24 @@ class Planner:
             if dims:
                 for ent, ms in by_entity.items():
                     steps.append(Step(sid(), "QUERY", f"{', '.join(ms)} by {', '.join(dims)}",
-                                      spec(ms, dims), period="P1"))
+                                      spec(self.with_parts(ms), dims), period="P1", dimension=dims[0],
+                                      role="breakdown"))
                     if baseline:
                         steps.append(Step(sid(), "QUERY", f"{', '.join(ms)} by {', '.join(dims)}, baseline",
-                                          spec(ms, dims, tr=baseline), period="P0"))
-        steps.append(Step(sid(), "DQ_CHECK", "Data quality over the window", deferred=True))
+                                          spec(self.with_parts(ms), dims, tr=baseline), period="P0",
+                                          dimension=dims[0], role="breakdown"))
+        steps.append(Step(sid(), "DQ_CHECK", "Data quality over the window"))
         obj = intent.intent_summary or f"{qt.lower()} of {primary}"
         return Plan(uuid.uuid4().hex[:12], obj, qt, refs, periods, steps, [], notes + intent.notes)
 
-    def _volume_refs(self, ref: str) -> list[str]:
-        """Rates get a volume column next to them (segment weights for the decomposition)."""
-        met = self.model.metrics[ref.partition(":")[0]]
-        if met.format != "percent":
-            return []
-        ent = self._entity(ref)
-        return ["attempt_count"] if ent == "attempts" else ["order_count"] if ent == "orders" else []
+    def with_parts(self, refs: list[str]) -> list[str]:
+        """Ratio metrics travel with their numerator and denominator: exact decompositions,
+        significance tests and low-volume flags need the counts, not just the rate."""
+        out = list(refs)
+        for r in refs:
+            if self.model.is_ratio(r):
+                out += [f"{r}#num", f"{r}#den"]
+        return out
 
     # ------------------------------------------------------------------ result-size guard
     def check_size(self, plan: Plan, catalog: dict, merchant_count: int) -> Narrowing | None:

@@ -31,7 +31,7 @@ from sqlglot.optimizer.qualify import qualify
 from sqlglot.optimizer.scope import traverse_scope
 
 from .policies import Policy, Principal, Role
-from .semantic import SemanticModel, columns_in
+from .semantic import SemanticModel, columns_in, ratio_parts
 
 PASS = "PASS"
 FAIL_UNSAFE = "FAIL_UNSAFE"
@@ -119,8 +119,11 @@ def bind_params(sql: str, params: list | tuple | None) -> str:
     if len(trees) != 1:
         raise ValueError("bind_params expects one statement")
     tree = trees[0]
-    holders = [p for p in tree.find_all(exp.Placeholder)]
-    holders.sort(key=lambda n: (n.meta.get("line", 0), n.meta.get("col", 0)))
+    # depth-first pre-order follows the text left to right (breadth-first does not: with nested
+    # AND chains it would bind values to the wrong placeholders)
+    holders = list(tree.find_all(exp.Placeholder, bfs=False))
+    if all("line" in n.meta and "col" in n.meta for n in holders):
+        holders.sort(key=lambda n: (n.meta["line"], n.meta["col"]))
     if len(holders) != len(params):
         raise ValueError(f"{len(holders)} placeholders but {len(params)} parameters")
     for node, value in zip(holders, params):
@@ -309,7 +312,8 @@ class SqlValidator:
         # S13 / S14 / S16 warnings
         self._warnings(tree, res, metrics_used)
 
-        if any(not c.passed for c in res.checks):
+        # warnings (S13/S14/S16) never stop validation: RLS and the cost check must still run
+        if any(not c.passed and c.severity != "warn" for c in res.checks):
             return self._finish(res)
 
         # S10 LIMIT (auto-fix) and S11 RLS (auto-fix) on the original tree
@@ -331,6 +335,9 @@ class SqlValidator:
     def _finish(self, res: ValidationResult) -> ValidationResult:
         failed = {c.severity for c in res.checks if not c.passed}
         res.status = next((s for s in _SEVERITY if s in failed), PASS)
+        if res.ok and res.rewritten_sql is None:      # never seal a query that skipped the rewrite
+            res.status = FAIL_REPAIRABLE
+            res.errors.append("internal: validation did not complete")
         if res.ok:
             res.seal = seal_for(res.rewritten_sql, res.principal)
         else:
@@ -456,7 +463,8 @@ class SqlValidator:
                     diffs.append(f"{ref} (unknown metric)")
                     continue
                 ent = self.model.entities[r.entity]
-                needed = re.findall(r"\{(\w+)\}", r.variant.sql)
+                tmpl = ratio_parts(r.variant.sql)[r.part] if r.part else r.variant.sql
+                needed = re.findall(r"\{(\w+)\}", tmpl)
                 frag = [_canonical(sqlglot.parse_one(ent.measures[m], read="duckdb")) for m in needed]
                 missing = [m for m, f in zip(needed, frag) if f not in canon_sql]
                 if missing:

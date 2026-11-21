@@ -12,8 +12,8 @@ The full design is in [`docs/SPEC.md`](docs/SPEC.md).
 | 2 | **Semantic layer + access policies**: metrics, dimensions, synonyms, time expressions, RBAC, row-level scope, catalog | ✅ done |
 | 3 | **SQL safety**: sqlglot validator (S01–S16), row-level security rewrite, cost guard, sealed read-only executor | ✅ done |
 | 4 | **LLM pipeline**: parse → access pre-check → ambiguity check (probes) → plan → SQL generation → repair loop | ✅ done |
-| 5 | Analysis engine: mix/rate decomposition, driver ranking, drill-down, data-quality checks, reconciliation | ⏳ next |
-| 6 | Answer composer: facts / hypotheses / recommendations, number grounding, confidence | ⬜ |
+| 5 | **Analysis engine**: mix/rate decomposition, driver ranking, drill-down, data-quality checks, reconciliation, hypotheses | ✅ done |
+| 6 | Answer composer: facts / hypotheses / recommendations, number grounding, confidence | ⏳ next |
 | 7 | API (FastAPI + SSE) + metadata DB | ⬜ |
 | 8 | UI | ⬜ |
 | 9 | Eval harness, demo, write-up | ⬜ |
@@ -29,7 +29,7 @@ python scripts/generate_data.py   # builds data/warehouse.duckdb (~1.05M attempt
 python scripts/verify_data.py     # checks every planted anomaly, writes fixtures/ground_truth.json
 python scripts/check_semantic.py  # validates the semantic layer + policies, re-derives the ground truth through it
 python scripts/check_safety.py    # ground truth through the SQL gate + an attack catalog (34 checks)
-python scripts/check_pipeline.py  # the SPEC eval questions through the question pipeline (29 checks)
+python scripts/check_pipeline.py  # the SPEC eval questions through pipeline + analysis, vs ground truth (43 checks)
 pytest -q                         # fast tests at reduced scale
 ```
 
@@ -203,7 +203,8 @@ PARSING ─┬─ data-change request ──────────────
 ACCESS_PRECHECK ── restricted metric, out-of-scope filter ▶ REFUSED_ACCESS
 AMBIGUITY_CHECK ── material ambiguity (probe values shown) ▶ AWAITING_CLARIFICATION ─ answer ─▶ re-run
 PLANNING ── result larger than the row cap ─────────▶ AWAITING_NARROWING ─ option ─▶ re-run
-SQL_GENERATION ⇄ VALIDATION ⇄ EXECUTION (repair loop ≤ 2) ──▶ EXECUTED   (hand-off to segments 5-6)
+SQL_GENERATION ⇄ VALIDATION ⇄ EXECUTION (repair loop ≤ 2)
+DQ_CHECK + ANALYSIS (segment 5) ──▶ ANALYZED | ANSWERED_WITH_DQ_BLOCK   (hand-off to segment 6)
 ```
 
 **LLM proposes, code disposes.**
@@ -245,6 +246,37 @@ SQL_GENERATION ⇄ VALIDATION ⇄ EXECUTION (repair loop ≤ 2) ──▶ EXECUT
 
 Configuration lives in `config/analyst.yaml` under `llm:`, `defaults:` and `ambiguity:`. `scripts/check_pipeline.py --llm anthropic` runs the same eval checks through Claude.
 
+## Analysis engine (segment 5)
+
+[`analyst/analysis.py`](analyst/analysis.py) turns executed results into findings. Every extra query it needs (drill-downs, failure codes, reconciliation tests) runs **through the same gate as the user**, with row-level security, and shows up as an extra step.
+
+| Method | What it does |
+|---|---|
+| Headline | P0 / P1 / delta. Rates carry their numerator and denominator (`success_rate#num` / `#den`, a new semantic-layer feature), so changes get a two-proportion z-test. |
+| Mix / rate decomposition | Exact and symmetric (residual 0 by construction). Per-segment mix effects are **centred on the average rate**, (w₁−w₀)·(r̄ᵢ−R̄). Totals are identical to the SPEC formula, but each segment's number now reads on its own: a growing, below-average segment shows a negative mix effect instead of a large positive one. New or disappearing segments are treated as pure mix. Segments get a significance test and a low-volume flag. |
+| Contribution | Additive metrics (GMV, counts): segment deltas and share of the change. |
+| Best dimension + driver ranking | Each split is scored by **how well it explains the change**. A mix-dominant split explains it away (every segment's own rate is flat), so it scores by its mix share. Otherwise it scores by concentration: share of the change minus share of volume, so a big segment absorbing a broad drop explains little. A child dimension that explains as well as its parent wins (sub_method over payment_method). Drivers are ranked by lift × significance × volume weight. |
+| Drill-down (≤ 3 levels) | Applied when the top driver explains more than 50% of the change. **Mix-driven:** shows where the extra volume came from, by merchant. **Rate-driven:** looks at the next dimensions, the affected hours (for single days) and the failure codes that rose. |
+| Data quality ([`analyst/dq.py`](analyst/dq.py)) | DQ01 duplicates (mitigated by the dedup view), DQ02 null keys (scoped to the dimensions they affect), DQ03 orphan keys, DQ05 late-arriving days, DQ06 volume anomalies (robust z-score, calendar events named), DQ07 value ranges, DQ08 status validity, DQ09 source mismatch, DQ10 merchant reclassification. Severity is INFO, WARN or BLOCK. A BLOCK on an affected analysis gives `ANSWERED_WITH_DQ_BLOCK`. |
+| Reconciliation | Dashboard GMV vs the finance ledger: a waterfall of PENDING / REVERSED / FAILED / ON_HOLD settlements, payments with no settlement record, the UTC vs IST day boundary, and merchants missing from the ledger. It ends with the residual, a unit (paise/rupee) check and a recommendation. |
+| Hypotheses → recommendations | Templated from patterns: mix shift, issuer outage (hours + code 91/96), acquirer degradation (timeouts), rate change in a segment, incomplete data, reclassification, sale events, an unsupported premise ("why did it drop?" when it didn't), and a volume shift. Each recommendation cites its hypothesis and, where computable, an expected impact in pp. |
+
+What it finds on the planted anomalies (all asserted in `scripts/check_pipeline.py`):
+
+| Question | Result |
+|---|---|
+| Why did success rate drop in the last two weeks? (A1) | 88.13% → 85.49%. **MIX_DOMINANT** by sub_method: mix −2.54pp, rate −0.09pp, matching ground truth exactly. UPI_COLLECT went from 12.6% to 32.8% of volume while its own rate stayed flat at about 77%. 97% of the extra collect volume is **QuickBazaar**. Recommendation: move QuickBazaar's collect traffic to intent (about +1.97pp). |
+| Drill into UPI Collect by merchant (follow-up) | Rate change not significant (p = 0.40). Volume shifted to QuickBazaar (0% → 72% of the segment). |
+| What happened to card success on September 10? (A2) | **Meridian Bank** issuer outage, **18:00–23:00 IST**, failures dominated by code **91**. |
+| Worst card-not-present acquirer in late September? (A3) | **Acquirer Beta**: acquirer-timeout failures rose from 1.9% to 5.7% of attempts. Recommendation: shift routing. |
+| Why does finance's October settled amount differ? (A6) | 3.53% gap fully explained to the paisa (residual ₹0): reversed ₹73.1L, missing merchants ₹59.2L, failed ₹51.1L, on hold ₹30.9L, timezone ₹4.9L. |
+| Did success rate drop yesterday? (A7) | −0.20pp, not significant, so "premise not supported". The incomplete Oct 28 is excluded and flagged. |
+
+### Fixes to segment 3 found while building this
+
+- **Parameter binding order.** `bind_params` filled `?` placeholders in breadth-first order. With three or more conditions, values could bind to the wrong placeholders: an error when the types differed, silently wrong filters when they matched. It now follows text order, with a regression test against hand-written SQL.
+- **Warnings no longer stop validation.** A failed *warning* check (S13/S14/S16) used to stop validation before the row-level-security rewrite. The executor then refused the query, so it failed closed: valid queries simply couldn't run. Warnings now never short-circuit. As a guard, a result that skipped the rewrite is never sealed.
+
 ## Repository layout
 
 ```
@@ -265,6 +297,8 @@ analyst/
   planner.py        question-type plan templates, result-size guard / narrowing
   sqlgen.py         LLM SQL generation + repair loop through the safety gate
   pipeline.py       the state machine (Analyst.ask), Session, trace
+  analysis.py       decomposition, driver ranking, drill-down, trend, reconciliation, hypotheses
+  dq.py             data-quality checks DQ01-DQ10 (cached per window and data version)
 semantic/model.yaml     entities, measures, metrics, dimensions, ambiguous terms, glossary
 config/generator.yaml   every generator knob (volumes, rates, anomaly windows and magnitudes)
 config/policies.yaml    roles, row-level scopes, demo users
@@ -282,6 +316,8 @@ docs/SPEC.md        full system specification
 - Anomalies are isolated in time so each has one clean, verifiable explanation.
 - Every `v_attempts` query scans the whole raw table: the view's deduplication window blocks filter pushdown. That is fine at 1M rows. At scale, the deduplicated table should be materialised so time filters cut the scan, and the cost guard would show the difference.
 - The time-filter rule (S07) is best-effort: any predicate on a fact's time column counts. The EXPLAIN cost guard (S12) is the backstop.
+- Data-quality checks are fixed system queries over the whole warehouse (not scoped by role). They report only rates and dates, never values or row counts.
+- Hypotheses are templates over measured patterns. They are not causal proof; the composer (segment 6) phrases them as hypotheses, with confidence.
 - The offline parser is rules, tuned on the demo and eval questions. Real phrasing variety needs the Claude backend. No live Claude run is part of this commit: no API key was available here. The request shape is unit-tested against a fake client.
 - Merchant-name entity resolution is exact, then unique substring, then a fuzzy "did you mean". Names are not unique across regions; resolution only ever sees the user's scope.
 - The generator favours clarity over realism in places. For example, merchant success-rate noise is centred so the A1 campaign merchant is exactly average, which makes A1 a near-pure mix effect.
