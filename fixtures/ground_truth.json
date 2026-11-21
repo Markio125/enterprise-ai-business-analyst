@@ -1,0 +1,394 @@
+{
+  "generated_with": {
+    "seed": 42,
+    "config_sha": "c9ded5aba165be16"
+  },
+  "as_of_complete_date": "2026-10-27",
+  "timezone": "Asia/Kolkata",
+  "row_counts": {
+    "fact_payment_attempts_raw": 1056392,
+    "v_attempts": 1056146
+  },
+  "A9_denominators": {
+    "attempt_level_all": 0.8493,
+    "attempt_level_excl_user_cancel": 0.8751,
+    "technical_success_rate": 0.9385,
+    "order_level": 0.9317,
+    "window": [
+      "2026-07-01",
+      "2026-10-27"
+    ]
+  },
+  "A1_mix_shift": {
+    "question": "Why did success rate drop in the last two weeks?",
+    "metric": "success_rate (attempt level, excluding user-cancelled)",
+    "periods": {
+      "P0": [
+        "2026-09-30",
+        "2026-10-13"
+      ],
+      "P1": [
+        "2026-10-14",
+        "2026-10-27"
+      ]
+    },
+    "overall": {
+      "sr_p0": 0.8813,
+      "sr_p1": 0.8549,
+      "delta_pp": -2.6345,
+      "mix_effect_pp": -2.541,
+      "rate_effect_pp": -0.0935
+    },
+    "by_sub_method": {
+      "UPI_INTENT": {
+        "w0": 0.2168,
+        "w1": 0.1681,
+        "r0": 0.9141,
+        "r1": 0.9141,
+        "mix_effect_pp": -4.4487,
+        "rate_effect_pp": 0.0018,
+        "total_pp": -4.4469,
+        "denom_p0": 25191,
+        "denom_p1": 26255
+      },
+      "DEBIT": {
+        "w0": 0.1925,
+        "w1": 0.1473,
+        "r0": 0.8854,
+        "r1": 0.8821,
+        "mix_effect_pp": -3.995,
+        "rate_effect_pp": -0.055,
+        "total_pp": -4.05,
+        "denom_p0": 22366,
+        "denom_p1": 22999
+      },
+      "UPI_QR": {
+        "w0": 0.163,
+        "w1": 0.124,
+        "r0": 0.9267,
+        "r1": 0.9256,
+        "mix_effect_pp": -3.6128,
+        "rate_effect_pp": -0.0164,
+        "total_pp": -3.6291,
+        "denom_p0": 18939,
+        "denom_p1": 19361
+      },
+      "CREDIT": {
+        "w0": 0.1611,
+        "w1": 0.1233,
+        "r0": 0.9059,
+        "r1": 0.9013,
+        "mix_effect_pp": -3.4142,
+        "rate_effect_pp": -0.0667,
+        "total_pp": -3.4808,
+        "denom_p0": 18723,
+        "denom_p1": 19262
+      },
+      "NETBANKING": {
+        "w0": 0.0651,
+        "w1": 0.0503,
+        "r0": 0.8131,
+        "r1": 0.8068,
+        "mix_effect_pp": -1.1961,
+        "rate_effect_pp": -0.0365,
+        "total_pp": -1.2326,
+        "denom_p0": 7566,
+        "denom_p1": 7862
+      },
+      "WALLET": {
+        "w0": 0.0308,
+        "w1": 0.025,
+        "r0": 0.9388,
+        "r1": 0.9353,
+        "mix_effect_pp": -0.5382,
+        "rate_effect_pp": -0.0097,
+        "total_pp": -0.5479,
+        "denom_p0": 3576,
+        "denom_p1": 3909
+      },
+      "CARD_EMI": {
+        "w0": 0.0215,
+        "w1": 0.0166,
+        "r0": 0.8013,
+        "r1": 0.8009,
+        "mix_effect_pp": -0.3886,
+        "rate_effect_pp": -0.0007,
+        "total_pp": -0.3892,
+        "denom_p0": 2496,
+        "denom_p1": 2597
+      },
+      "BNPL": {
+        "w0": 0.0133,
+        "w1": 0.0101,
+        "r0": 0.8555,
+        "r1": 0.8567,
+        "mix_effect_pp": -0.2813,
+        "rate_effect_pp": 0.0014,
+        "total_pp": -0.2799,
+        "denom_p0": 1550,
+        "denom_p1": 1570
+      },
+      "PREPAID": {
+        "w0": 0.0098,
+        "w1": 0.0077,
+        "r0": 0.8476,
+        "r1": 0.8625,
+        "mix_effect_pp": -0.1781,
+        "rate_effect_pp": 0.013,
+        "total_pp": -0.1651,
+        "denom_p0": 1135,
+        "denom_p1": 1200
+      },
+      "UPI_COLLECT": {
+        "w0": 0.1261,
+        "w1": 0.3275,
+        "r0": 0.7686,
+        "r1": 0.7719,
+        "mix_effect_pp": 15.5118,
+        "rate_effect_pp": 0.0752,
+        "total_pp": 15.587,
+        "denom_p0": 14656,
+        "denom_p1": 51147
+      }
+    },
+    "by_method_overall": {
+      "sr_p0": 0.8813,
+      "sr_p1": 0.8549,
+      "delta_pp": -2.6345,
+      "mix_effect_pp": -0.1932,
+      "rate_effect_pp": -2.4414
+    },
+    "by_method": {
+      "CARD": {
+        "w0": 0.3634,
+        "w1": 0.2783,
+        "r0": 0.8935,
+        "r1": 0.8901,
+        "mix_effect_pp": -7.5865,
+        "rate_effect_pp": -0.1094
+      },
+      "NETBANKING": {
+        "w0": 0.0651,
+        "w1": 0.0503,
+        "r0": 0.8131,
+        "r1": 0.8068,
+        "mix_effect_pp": -1.1961,
+        "rate_effect_pp": -0.0365
+      },
+      "WALLET": {
+        "w0": 0.0308,
+        "w1": 0.025,
+        "r0": 0.9388,
+        "r1": 0.9353,
+        "mix_effect_pp": -0.5382,
+        "rate_effect_pp": -0.0097
+      },
+      "EMI": {
+        "w0": 0.0215,
+        "w1": 0.0166,
+        "r0": 0.8013,
+        "r1": 0.8009,
+        "mix_effect_pp": -0.3886,
+        "rate_effect_pp": -0.0007
+      },
+      "BNPL": {
+        "w0": 0.0133,
+        "w1": 0.0101,
+        "r0": 0.8555,
+        "r1": 0.8567,
+        "mix_effect_pp": -0.2813,
+        "rate_effect_pp": 0.0014
+      },
+      "UPI": {
+        "w0": 0.5059,
+        "w1": 0.6196,
+        "r0": 0.8819,
+        "r1": 0.8412,
+        "mix_effect_pp": 9.7975,
+        "rate_effect_pp": -2.2865
+      }
+    },
+    "interpretation_code": "MIX_DOMINANT",
+    "top_driver": {
+      "dimension": "sub_method",
+      "segment": "UPI_COLLECT"
+    },
+    "order_level_sr": {
+      "P0": 0.9341,
+      "P1": 0.9222
+    },
+    "incremental_upi_collect_top_merchant": {
+      "merchant_name": "QuickBazaar",
+      "share_of_increase": 0.9691
+    },
+    "note": "By `method`, UPI shows a rate decline because UPI mixes intent (~91%) and collect (~77%); by `sub_method` the change is almost pure mix."
+  },
+  "A2_issuer_outage": {
+    "question": "What happened to card success on September 10?",
+    "issuer": {
+      "bank_code": "MRDN",
+      "bank_name": "Meridian Bank"
+    },
+    "date": "2026-09-10",
+    "window_ist": "18:00-23:00",
+    "sr_in_window": 0.3058,
+    "sr_same_hours_prior_7d": 0.8739,
+    "other_issuers_sr_in_window": 0.8749,
+    "top_card_response_code": "91"
+  },
+  "A3_acquirer_degradation": {
+    "question": "Which acquirer had the worst card-not-present performance in late September and why?",
+    "window": [
+      "2026-09-20",
+      "2026-09-27"
+    ],
+    "baseline": [
+      "2026-09-12",
+      "2026-09-19"
+    ],
+    "top_driver": {
+      "dimension": "acquirer",
+      "segment": "ACQ_B"
+    },
+    "by_acquirer": {
+      "ACQ_A": {
+        "timeout_rate_before": 0.0122,
+        "timeout_rate_window": 0.0136,
+        "sr_before": 0.8738,
+        "sr_window": 0.8687
+      },
+      "ACQ_B": {
+        "timeout_rate_before": 0.0127,
+        "timeout_rate_window": 0.0691,
+        "sr_before": 0.8732,
+        "sr_window": 0.8119
+      },
+      "ACQ_C": {
+        "timeout_rate_before": 0.0137,
+        "timeout_rate_window": 0.0126,
+        "sr_before": 0.8836,
+        "sr_window": 0.8764
+      }
+    }
+  },
+  "A4_duplicates": {
+    "date": "2026-10-05",
+    "raw_rows": 8435,
+    "deduplicated_rows": 8189,
+    "duplicate_rate": 0.03,
+    "eval_EV07_transactions_on_date": 8189
+  },
+  "A5_null_merchant": {
+    "window": [
+      "2026-10-18",
+      "2026-10-20"
+    ],
+    "source_system": "POS_SWITCH",
+    "null_rate_in_window": 0.083,
+    "eval_EV13_gmv_by_segment": {
+      "SMB": 28820392.97,
+      "MID_MARKET": 25930255.2,
+      "ENTERPRISE": 19814444.51,
+      "UNKNOWN": 2514009.08
+    }
+  },
+  "A6_source_disagreement": {
+    "question": "Why does finance's settled amount for this month differ from the dashboard GMV?",
+    "window": [
+      "2026-10-01",
+      "2026-10-27"
+    ],
+    "dashboard_gmv_inr": 621667538.41,
+    "finance_gross_inr": 599745170.97,
+    "diff_inr": 21922367.44,
+    "diff_pct": 3.526,
+    "explained_by_inr": {
+      "not_yet_settled_PENDING": 0.0,
+      "REVERSED_excluded": 7312974.56,
+      "settlement_FAILED_excluded": 5107465.85,
+      "ON_HOLD_excluded": 3090375.15,
+      "timezone_IST_vs_UTC_day": 490946.09,
+      "merchants_missing_in_finance": 5920605.79
+    },
+    "residual_inr": 0.0,
+    "finance_missing_mids": [
+      "MID100022",
+      "MID100023"
+    ],
+    "fact_settlements_settled_ist_inr": 606156722.85
+  },
+  "A7_late_data": {
+    "question": "Did success rate drop yesterday?",
+    "date": "2026-10-28",
+    "volume_vs_prior_7d_median": 0.7878,
+    "pending_rate": 0.1188,
+    "prior_pending_rate": 0.0019,
+    "sr": 0.7342,
+    "prior_sr_mean": 0.8559,
+    "correct_interpretation": "Incomplete data (late ingestion / unconfirmed successes), not a real decline."
+  },
+  "A8_sale_event": {
+    "name": "Freedom Sale",
+    "window": [
+      "2026-08-10",
+      "2026-08-16"
+    ],
+    "volume_ratio_vs_prior_week": 1.7919,
+    "sr_delta_pp": -1.528
+  },
+  "A10_reclassification": {
+    "date": "2026-09-01",
+    "merchants_moved": 30,
+    "from": "SMB",
+    "to": "MID_MARKET",
+    "active_merchants_by_segment_week_before_after": {
+      "ENTERPRISE": {
+        "before": 19,
+        "after": 19
+      },
+      "MID_MARKET": {
+        "before": 98,
+        "after": 128
+      },
+      "SMB": {
+        "before": 275,
+        "after": 246
+      }
+    }
+  },
+  "eval_answers": {
+    "EV04_top5_west_merchants_by_gmv_last_month": {
+      "window": [
+        "2026-09-01",
+        "2026-09-30"
+      ],
+      "rows": [
+        {
+          "merchant_name": "Indus Institute",
+          "merchant_id": "MID100002",
+          "gmv_inr": 22351051.92
+        },
+        {
+          "merchant_name": "Silver Webstore",
+          "merchant_id": "MID100014",
+          "gmv_inr": 14150231.67
+        },
+        {
+          "merchant_name": "Royal Direct",
+          "merchant_id": "MID100015",
+          "gmv_inr": 10414455.03
+        },
+        {
+          "merchant_name": "Metro Classes",
+          "merchant_id": "MID100064",
+          "gmv_inr": 10272948.88
+        },
+        {
+          "merchant_name": "Anand Diagnostics",
+          "merchant_id": "MID100013",
+          "gmv_inr": 5748736.33
+        }
+      ]
+    }
+  }
+}

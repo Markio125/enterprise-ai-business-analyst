@@ -1,0 +1,155 @@
+# Synthetic payments warehouse — generator configuration.
+# Every value here is deterministic given `seed`. Change a value, re-run
+# `python scripts/generate_data.py`, then `python scripts/verify_data.py`.
+
+seed: 42
+start_date: "2026-07-01"
+end_date: "2026-10-28"              # last day in the data; it is deliberately only partially loaded (A7)
+as_of_complete_date: "2026-10-27"   # last fully loaded day — "today" for relative-time questions
+snapshot_at_ist: "2026-10-29 02:00:00"
+timezone: Asia/Kolkata
+
+volume:
+  base_orders_per_day: 7000         # ~1.0M attempts over 120 days incl. retries & campaign
+  daily_growth: 0.001               # compounding per day
+  weekend_factor: 1.05
+  daily_noise_sd: 0.04              # log-normal day-to-day noise
+  # Relative order volume per IST hour (0..23)
+  hourly_profile: [0.6, 0.4, 0.3, 0.25, 0.25, 0.4, 0.8, 1.5, 2.5, 3.5, 4.5, 5.2,
+                   5.5, 5.3, 5.0, 4.8, 4.8, 5.0, 5.6, 6.2, 6.5, 6.0, 4.5, 2.5]
+
+merchants:
+  segments: {ENTERPRISE: 20, MID_MARKET: 100, SMB: 280}
+  # log-normal (mu, sigma) of each merchant's traffic weight, by segment
+  segment_weight_lognormal:
+    ENTERPRISE: [4.0, 0.5]
+    MID_MARKET: [2.3, 0.6]
+    SMB: [0.8, 0.8]
+  pos_share: 0.30                   # share of merchants that are in-store (POS)
+  new_in_period: 25                 # merchants onboarded during the data window
+  merchant_adj_sd_pp: 1.0           # merchant-level success-rate noise (traffic-weighted mean = 0)
+
+behaviour:
+  cancel_rate: {online: 0.04, pos: 0.01}
+  pending_rate: 0.002
+  timeout_share_of_failures: 0.12
+  retry_prob_after_failure: 0.65
+  retry_prob_after_cancel: 0.40
+  retry_switch_method_prob: 0.30
+  max_attempts: 3
+  card_present_bonus_pp: 2.0
+  night_penalty_pp: 2.0             # 00:00–04:59 IST
+  device_adj_pp: {ANDROID: 0.0, IOS: 1.5, WEB: -1.5, POS: 0.0}
+
+# Share of first attempts by sub-method, per channel type
+payment_mix:
+  online: {UPI_INTENT: 0.35, UPI_COLLECT: 0.19, CREDIT: 0.13, DEBIT: 0.13, PREPAID: 0.01,
+           NETBANKING: 0.10, WALLET: 0.05, EMI: 0.02, BNPL: 0.02}
+  pos:    {UPI_QR: 0.45, CREDIT: 0.22, DEBIT: 0.30, PREPAID: 0.01, EMI: 0.02}
+
+# Success probability excluding user cancellations, before adjustments
+base_success_rate:
+  UPI_INTENT: 0.92
+  UPI_COLLECT: 0.78
+  UPI_QR: 0.93
+  CREDIT: 0.90
+  DEBIT: 0.88
+  PREPAID: 0.85
+  NETBANKING: 0.82
+  WALLET: 0.94
+  EMI: 0.80
+  BNPL: 0.86
+
+# Fictional issuing banks: [code, name, type, traffic share, success-rate adjustment in pp]
+issuers:
+  - [NSTR, Northstar Bank, PRIVATE, 0.16, 1.0]
+  - [BHRT, Bharat National Bank, PUBLIC, 0.18, -1.5]
+  - [SAHY, Sahyadri Bank, PRIVATE, 0.12, 0.5]
+  - [KVRY, Kaveri Bank, PRIVATE, 0.09, 1.5]
+  - [DKSN, Dakshin Bank, PRIVATE, 0.07, 0.0]
+  - [MRDN, Meridian Bank, PRIVATE, 0.06, 0.0]
+  - [PRBH, Prabhat Bank, PUBLIC, 0.06, -1.0]
+  - [GNGA, Ganga Gramin Bank, PUBLIC, 0.05, -3.0]
+  - [TRVN, Triveni Bank, PRIVATE, 0.04, 0.5]
+  - [ARVL, Aravali Bank, PUBLIC, 0.04, -0.5]
+  - [UNTY, Unity Small Finance Bank, SMALL_FINANCE, 0.03, -2.0]
+  - [VRDN, Vardhan Small Finance Bank, SMALL_FINANCE, 0.03, -2.5]
+  - [CRST, Crestline Bank, FOREIGN, 0.03, 2.0]
+  - [SKYP, SkyPay Payments Bank, PAYMENTS_BANK, 0.02, -1.0]
+  - [HRZN, Horizon Bank, PRIVATE, 0.02, 1.0]
+
+# Fictional acquirers: [code, name, share, success-rate adjustment in pp for card traffic]
+acquirers:
+  - [ACQ_A, Acquirer Alpha, 0.45, 0.0]
+  - [ACQ_B, Acquirer Beta, 0.35, -0.5]
+  - [ACQ_C, Acquirer Gamma, 0.20, 0.5]
+
+anomalies:
+  A1_mix_shift:              # overall SR drops while no sub-method's SR changes (Simpson's paradox)
+    enabled: true
+    merchant_name: QuickBazaar
+    start: "2026-10-14"
+    campaign_orders_per_day: 2400   # all first attempts are UPI_COLLECT
+  A2_issuer_outage:
+    enabled: true
+    issuer_code: MRDN
+    date: "2026-09-10"
+    start_hour: 18                  # IST, inclusive
+    end_hour: 23                    # IST, exclusive
+    success_rate: 0.35
+  A3_acquirer_degradation:
+    enabled: true
+    acquirer_code: ACQ_B
+    start: "2026-09-20"
+    end: "2026-09-27"
+    extra_timeout_rate: 0.06        # card-not-present only
+  A4_duplicates:
+    enabled: true
+    date: "2026-10-05"
+    rate: 0.03                      # share of that day's rows replayed into the raw table
+  A5_null_merchant:
+    enabled: true
+    start: "2026-10-18"
+    end: "2026-10-20"
+    source: POS_SWITCH
+    rate_within_source: 0.30
+  A6_finance_source:
+    enabled: true
+    missing_merchants: 2            # merchants absent from the finance ledger (unmapped MIDs)
+  A7_late_data:
+    enabled: true
+    date: "2026-10-28"
+    missing_rate: 0.20              # rows not yet ingested
+    success_pending_rate: 0.15      # successes whose confirmation has not arrived (still PENDING)
+  A8_sale_event:
+    enabled: true
+    name: Freedom Sale
+    start: "2026-08-10"
+    end: "2026-08-16"
+    online_volume_multiplier: 2.2
+    success_penalty_pp: 1.0
+  A10_reclassification:
+    enabled: true
+    date: "2026-09-01"
+    count: 30
+    from_segment: SMB
+    to_segment: MID_MARKET
+
+settlement:
+  status_mix: {SETTLED: 0.975, ON_HOLD: 0.005, REVERSED: 0.012, FAILED: 0.008}
+  mdr_pct:
+    UPI_INTENT: 0.0
+    UPI_COLLECT: 0.0
+    UPI_QR: 0.0
+    DEBIT: 0.4
+    CREDIT: 1.8
+    PREPAID: 1.5
+    NETBANKING: 1.6
+    WALLET: 1.7
+    EMI: 2.2
+    BNPL: 2.0
+  gst_on_fee_pct: 18.0
+
+refunds:
+  rate: 0.02
+  max_lag_days: 10
