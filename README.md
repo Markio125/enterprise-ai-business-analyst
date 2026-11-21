@@ -10,8 +10,8 @@ The full design is in [`docs/SPEC.md`](docs/SPEC.md).
 |---|---|---|
 | 1 | **Data foundation**: synthetic warehouse + planted anomalies + ground truth | ✅ done |
 | 2 | **Semantic layer + access policies**: metrics, dimensions, synonyms, time expressions, RBAC, row-level scope, catalog | ✅ done |
-| 3 | SQL safety (sqlglot validator, row-level security rewrite, cost guard) + read-only executor | ⏳ next |
-| 4 | LLM pipeline: parse → ambiguity check → plan → SQL generation → repair loop | ⬜ |
+| 3 | **SQL safety**: sqlglot validator (S01–S16), row-level security rewrite, cost guard, sealed read-only executor | ✅ done |
+| 4 | LLM pipeline: parse → ambiguity check → plan → SQL generation → repair loop | ⏳ next |
 | 5 | Analysis engine: mix/rate decomposition, driver ranking, drill-down, data-quality checks, reconciliation | ⬜ |
 | 6 | Answer composer: facts / hypotheses / recommendations, number grounding, confidence | ⬜ |
 | 7 | API (FastAPI + SSE) + metadata DB | ⬜ |
@@ -28,6 +28,7 @@ pip install -r requirements.txt
 python scripts/generate_data.py   # builds data/warehouse.duckdb (~1.05M attempts, ~15 s)
 python scripts/verify_data.py     # checks every planted anomaly, writes fixtures/ground_truth.json
 python scripts/check_semantic.py  # validates the semantic layer + policies, re-derives the ground truth through it
+python scripts/check_safety.py    # ground truth through the SQL gate + an attack catalog (34 checks)
 pytest -q                         # fast tests at reduced scale
 ```
 
@@ -39,6 +40,10 @@ python scripts/catalog.py --user u_west                       # what this user m
 python scripts/query.py --metric success_rate --by sub_method --time "last two weeks" --compare
 python scripts/query.py --user u_west --metric gmv_inr --by merchant --time "last month" --top 5
 python scripts/query.py --user u_ops --metric mdr_revenue_inr # -> REFUSED_ACCESS with alternatives
+
+# free-form SQL through the safety gate (what LLM-generated SQL will go through)
+python scripts/run_sql.py --user u_west --explain "SELECT COUNT(*) FROM v_attempts WHERE date_key >= 20261001"
+python scripts/run_sql.py --user u_ops "SELECT 1; DROP TABLE v_attempts"
 ```
 
 `python scripts/generate_data.py --scale 0.2` builds a smaller warehouse for quick iteration. Output is deterministic for a given seed and config.
@@ -147,6 +152,39 @@ How the compiler stays correct:
 - Refusals follow the `REFUSED_ACCESS` contract: denied items, reasons, and alternatives the user *can* ask.
 - [`analyst/catalog.py`](analyst/catalog.py) builds the **role-filtered catalog**: metrics, dimensions, sample values, ambiguous terms, and what is not accessible. The same structure becomes `GET /catalog` in segment 7 and the grounding block in the LLM prompt in segment 4. Values that would leak across a scope (other regions or merchants) are left out.
 
+## SQL safety and execution (segment 3)
+
+Every query derived from user input goes through one gate: [`analyst/executor.py`](analyst/executor.py) `QueryGateway`. That covers LLM-written SQL and the semantic compiler's own SQL.
+
+```
+SQL (+ params) -> SqlValidator (sqlglot AST) -> PASS + HMAC seal -> ReadOnlyExecutor (sandboxed DuckDB)
+                        |-> FAIL_UNSAFE / FAIL_ACCESS_DENIED / FAIL_REPAIRABLE / NEEDS_NARROWING
+```
+
+| Rule | What [`analyst/sqlsafety.py`](analyst/sqlsafety.py) does | On fail |
+|---|---|---|
+| S01–S03 | Exactly one statement, rooted in SELECT/UNION. No DML, DDL, COPY, ATTACH, PRAGMA, SET, INSTALL/LOAD, CALL, EXPORT, SELECT INTO, DESCRIBE/SHOW anywhere in the tree. Statements sqlglot can't parse are classified by their leading keyword. | UNSAFE |
+| S04 | No file, URL, environment or catalog functions (`read_csv`, `glob`, `getenv`, `duckdb_*`, `pragma_*` ...) and no `FROM 'file.csv'` | UNSAFE |
+| S05 | Tables must be in the role's allow-list. Cross-database references, CTEs that **shadow real tables**, and recursive CTEs are blocked. System catalogs are denied. | ACCESS_DENIED / UNSAFE |
+| S06 | Every column is **resolved to its base table** through CTEs, subqueries and `SELECT *` expansion (sqlglot `qualify` + scopes), then checked against the role. Denied dimensions also deny their fact-side join keys: a merchant user can't `GROUP BY acquirer_key`. | ACCESS_DENIED |
+| S07 | Large facts need a time filter. Windows over `max_time_window_days` need narrowing. | REPAIRABLE / NARROWING |
+| S08, S09 | No `SELECT *` on facts. At most 4 joins. No cross, comma or `ON TRUE` joins. | REPAIRABLE |
+| S10 | Non-aggregated queries get a LIMIT (default 1000, cap 5000). Roles without row-level output (exec) are capped at 50. | AUTO_FIX |
+| S11 | **Row-level security**: every reference to a merchant-linked table (found from the schema: `merchant_key` / `merchant_id` columns) is replaced by a filtered subquery on `main.dim_merchant`. That includes references inside CTEs, subqueries and UNION branches, and the security predicate itself refers to the real table by its schema-qualified name. | AUTO_FIX |
+| S12 | DuckDB `EXPLAIN (FORMAT JSON)` estimates. Too many rows scanned, or a single operator that's too big (join explosions), gives NEEDS_NARROWING with concrete options, or REJECT if configured. | NARROWING |
+| S13, S14, S16 | Warnings: division without NULLIF. Metric SQL that doesn't match the semantic layer's measure definitions, which is also **disclosed** in the answer. Use of the raw table with duplicates. | WARN |
+| S15 | The validator is the only gate: the executor **refuses SQL without a valid HMAC seal** tied to the exact SQL text and the principal. | — |
+
+The executor is the second line of defence:
+- The connection is read-only, with `enable_external_access=false`, extension auto-install/load disabled, a memory limit, and `lock_configuration=true`.
+- Each statement has a timeout enforced through `interrupt()`.
+- Results are capped at the row limit and flagged as truncated.
+- Each result carries a `data_version` (base tables resolved through views) for caching later.
+
+Filter values from the semantic path are inlined by sqlglot as escaped literals. Row-level scope values are escaped the same way: an account manager called `x' OR '1'='1` matches nothing.
+
+`scripts/check_safety.py` runs the A9, A6 and EV04 ground truth through the full gate, plus 25 attacks (stacked statements, file exfiltration, CTE shadowing, PII through `SELECT *` and CTEs, routing leaks, join explosions ...). All 34 pass. `tests/test_sqlsafety.py` has about 100 adversarial cases.
+
 ## Repository layout
 
 ```
@@ -158,10 +196,14 @@ analyst/
   timeparse.py      relative time expressions + as-of (last complete day) detection
   policies.py       RBAC, row-level scope, refusal contract
   catalog.py        role-filtered catalog (JSON + LLM-prompt markdown)
+  sqlsafety.py      SQL validator (S01-S16), RLS rewrite, cost guard, seal
+  executor.py       sandboxed read-only executor + QueryGateway (the single query entry point)
+  settings.py       loads config/analyst.yaml
 semantic/model.yaml     entities, measures, metrics, dimensions, ambiguous terms, glossary
 config/generator.yaml   every generator knob (volumes, rates, anomaly windows and magnitudes)
 config/policies.yaml    roles, row-level scopes, demo users
-scripts/            generate_data.py, verify_data.py, check_semantic.py, catalog.py, query.py
+config/analyst.yaml     warehouse limits, cost controls, SQL-safety lists
+scripts/            generate_data.py, verify_data.py, check_semantic.py, check_safety.py, catalog.py, query.py, run_sql.py
 fixtures/ground_truth.json
 tests/
 docs/SPEC.md        full system specification
@@ -171,4 +213,6 @@ docs/SPEC.md        full system specification
 
 - Synthetic data only. Rates and distributions are plausible but not calibrated to any real processor.
 - Anomalies are isolated in time so each has one clean, verifiable explanation.
+- Every `v_attempts` query scans the whole raw table: the view's deduplication window blocks filter pushdown. That is fine at 1M rows. At scale, the deduplicated table should be materialised so time filters cut the scan, and the cost guard would show the difference.
+- The time-filter rule (S07) is best-effort: any predicate on a fact's time column counts. The EXPLAIN cost guard (S12) is the backstop.
 - The generator favours clarity over realism in places. For example, merchant success-rate noise is centred so the A1 campaign merchant is exactly average, which makes A1 a near-pure mix effect.

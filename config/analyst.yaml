@@ -1,0 +1,43 @@
+# Runtime settings for the analyst. Sections for the LLM, ambiguity handling and
+# answers are added in later segments (see docs/SPEC.md section 3).
+
+warehouse:
+  engine: duckdb
+  path: data/warehouse.duckdb
+  read_only: true
+  statement_timeout_ms: 10000
+  memory_limit: 1GB
+  threads: 4
+  max_result_rows: 5000        # hard cap on rows returned to the app
+  max_rows_to_llm: 200         # rows the LLM may see per result (used in segment 4)
+  default_limit: 1000          # injected into non-aggregated queries without a LIMIT
+
+cost_controls:
+  max_scanned_rows_estimate: 50000000   # from DuckDB EXPLAIN (sum of table-scan estimates)
+  max_intermediate_rows_estimate: 200000000   # largest operator estimate (catches join blow-ups)
+  max_joins: 4
+  forbid_cross_join: true
+  max_time_window_days: 400
+  # Large facts that need a time filter. Any predicate on one of the listed columns counts.
+  require_time_filter_on:
+    v_attempts: [date_key, created_at_utc]
+    fact_payment_attempts_raw: [date_key, created_at_utc, ingested_at_utc]
+    v_orders: [date_key, first_attempt_at_utc]
+    fact_settlements: [settlement_date_key]
+  on_exceed: ASK_TO_NARROW              # ASK_TO_NARROW | REJECT
+
+sql_safety:
+  # Table functions / scalar functions that touch files, the network, settings or the catalog.
+  denied_functions: [read_csv, read_csv_auto, read_parquet, parquet_scan, read_json, read_json_auto,
+                     read_json_objects, read_ndjson, read_ndjson_auto, read_text, read_blob, read_xlsx,
+                     csv_scan, sniff_csv, glob, query, query_table, getenv, current_setting,
+                     sqlite_scan, sqlite_attach, postgres_scan, postgres_attach, mysql_scan, iceberg_scan,
+                     delta_scan, arrow_scan, httpfs, load_extension, duckdb_settings, duckdb_extensions,
+                     duckdb_secrets, duckdb_databases, duckdb_tables, duckdb_columns, duckdb_views,
+                     duckdb_functions, duckdb_dependencies, duckdb_temporary_files, which_secret,
+                     pragma_version, pragma_database_size, pragma_table_info, pragma_storage_info,
+                     pragma_show, pragma_metadata_info, test_all_types, range_files]
+  # Tables an analyst query may never touch, whatever the role says (internal bookkeeping).
+  internal_tables: [_data_versions]
+  # Advisory: these tables have a cleaner curated view.
+  prefer_views: {fact_payment_attempts_raw: v_attempts}
