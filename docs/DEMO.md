@@ -10,7 +10,16 @@ python scripts/run_evals.py          # refreshes evals/REPORT.md (scene 9)
 uvicorn analyst.api:app --port 8000  # then open http://localhost:8000
 ```
 
-No API key is needed. Without one, the system uses its offline rule-based backend, and every number and answer below comes from that. With `ANTHROPIC_API_KEY` set (`llm.provider: auto`), Claude parses the questions, writes SQL for custom requests and words the answers. The gate, the analysis and the grounding check are identical either way.
+No API key is needed. Without one, the system uses its offline rule-based backend, and every number and answer below comes from that.
+
+**To demo with a real model,** put a key in `.env` in the project folder. The file is gitignored, so it's never committed, and the server reads it at startup:
+
+```
+OPENROUTER_API_KEY=sk-or-...
+ANALYST_LLM_PROVIDER=openrouter
+```
+
+The sidebar then shows "Language model: openrouter", and each answer's footer says which model worded it. A driver question takes about 3–4 model calls (parse, the clarification re-parse, wording, and a retry if the grounding check rejects a rewording). Free OpenRouter models have per-minute and daily limits. If one is hit mid-demo, that step is answered by the offline rules, and the footer says "worded by offline (fallback)". With `ANTHROPIC_API_KEY` set (`llm.provider: auto`), Claude parses the questions, writes SQL for custom requests and words the answers. The gate, the analysis and the grounding check are identical either way.
 
 ## Main story (role: exec, Meera Rao)
 

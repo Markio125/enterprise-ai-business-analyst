@@ -614,7 +614,8 @@ class Composer:
             g = ground(cand, allowed)
             if not g["unmatched"]:
                 cand.grounding = g | {"attempts": attempt + 1}
-                cand.composed_by = self.llm.name
+                cand.composed_by = "offline (fallback)" if reply.model == "offline-rules" and \
+                    self.llm.name != "offline" else self.llm.name
                 return self._final(res, cand)
             problems = [f"{u['where']}: the number {u['token']!r} does not appear in the results" for u in g["unmatched"]]
         # fall back to the grounded draft wording, but say the rewrite failed

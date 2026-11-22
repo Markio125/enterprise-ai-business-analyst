@@ -9,6 +9,9 @@ Every LLM call in the pipeline asks for JSON that matches a schema:
   system prompt (rules + role-filtered catalog) is marked for prompt caching.
 * `GeminiLLM` calls Google's Gemini REST API (AI Studio key in GEMINI_API_KEY) with
   JSON-schema structured output, retrying on rate limits and temporary overload.
+* `OpenRouterLLM` calls any OpenRouter model (OPENROUTER_API_KEY) through its OpenAI-compatible API,
+  with a hard per-process call cap for free quotas.
+* `FallbackLLM` wraps a remote backend and answers from the offline rules when it fails (demos).
 * `OfflineLLM` is a deterministic, rule-based stand-in. It reads the structured
   `context` instead of the prompt text. It lets the whole pipeline run (and be
   tested) without network access or an API key, and gives a reproducible baseline.
@@ -209,6 +212,138 @@ class GeminiLLM:
         raise LLMError("LLM provider unavailable")
 
 
+# --------------------------------------------------------------------------- OpenRouter (OpenAI-compatible REST)
+OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
+
+
+class CallBudget:
+    """A hard cap on real provider calls per process (OPENROUTER_MAX_CALLS / llm.<provider>.max_calls).
+    Every HTTP request counts, retries included, so a free quota can't be spent by accident."""
+
+    def __init__(self, limit: int | None):
+        self.limit, self.used = limit, 0
+
+    def take(self) -> None:
+        if self.limit is not None and self.used >= self.limit:
+            raise LLMError(f"call budget used up ({self.limit} calls)")
+        self.used += 1
+
+
+class OpenRouterLLM:
+    """Any OpenRouter model through its OpenAI-compatible API, with JSON-schema structured output.
+
+    `models` lets OpenRouter fall through to the next model when one is rate-limited or down; routing is
+    restricted to providers that honour the response schema (`require_parameters`)."""
+    name = "openrouter"
+
+    def __init__(self, settings: dict, client=None, api_key: str | None = None, sleep=time.sleep):
+        import httpx
+        self.cfg = settings["llm"].get("openrouter", {})
+        self.key = api_key or os.environ.get("OPENROUTER_API_KEY")
+        if not self.key:
+            raise LLMError("set OPENROUTER_API_KEY to use the OpenRouter backend")
+        self.client = client or httpx.Client(timeout=float(self.cfg.get("timeout_s", 120)))
+        self.max_retries = int(self.cfg.get("max_retries", 1))
+        env_cap = os.environ.get("OPENROUTER_MAX_CALLS")
+        cap = int(env_cap) if env_cap else self.cfg.get("max_calls")
+        self.budget = CallBudget(int(cap) if cap is not None else None)
+        self.sleep = sleep
+
+    def _models(self, tier: str) -> list[str]:
+        key = "models_fast" if tier == "fast" else "models_reasoning"
+        models = self.cfg.get(key) or self.cfg.get("models") or ["openrouter/free"]
+        return list(models)
+
+    def json(self, task, system, user, schema, tier="fast", context=None) -> LLMReply:
+        models = self._models(tier)
+        body = {
+            "model": models[0],
+            "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
+            "response_format": {"type": "json_schema",
+                                "json_schema": {"name": re.sub(r"[^a-zA-Z0-9_-]", "_", task), "strict": True,
+                                                "schema": schema}},
+            "max_tokens": int(self.cfg.get("max_output_tokens", 8000)),
+            "provider": {"require_parameters": True},
+        }
+        if len(models) > 1:
+            body["models"] = models
+        started = time.perf_counter()
+        j = self._post(body)
+        ms = int((time.perf_counter() - started) * 1000)
+        choices = j.get("choices") or []
+        if not choices:
+            raise LLMError(f"LLM provider returned no answer: {str(j.get('error') or j)[:200]}")
+        ch = choices[0]
+        if ch.get("error"):
+            raise LLMError(f"LLM provider error: {str(ch['error'])[:200]}")
+        finish = ch.get("finish_reason") or ""
+        if finish == "content_filter":
+            raise LLMError("the model declined this request")
+        if finish == "length":
+            raise LLMError("the model's reply was cut off (max tokens)")
+        text = (ch.get("message") or {}).get("content") or ""
+        text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text.strip())
+        try:
+            data = json.loads(text)
+        except json.JSONDecodeError as e:
+            raise LLMError(f"model returned invalid JSON: {e}") from e
+        if not isinstance(data, dict):
+            raise LLMError("model returned JSON that is not an object")
+        u = j.get("usage") or {}
+        cached = int(((u.get("prompt_tokens_details") or {}).get("cached_tokens")) or 0)
+        return LLMReply(data, j.get("model") or models[0], ms, int(u.get("prompt_tokens") or 0) - cached,
+                        int(u.get("completion_tokens") or 0), cached, text)
+
+    def _post(self, body: dict) -> dict:
+        import httpx
+        headers = {"Authorization": f"Bearer {self.key}", "X-Title": "AI Business Analyst demo"}
+        delay = 2.0
+        for attempt in range(self.max_retries + 1):
+            self.budget.take()
+            try:
+                r = self.client.post(OPENROUTER_URL, headers=headers, json=body)
+            except httpx.HTTPError as e:
+                if attempt == self.max_retries:
+                    raise LLMError("cannot reach the LLM provider") from e
+                self.sleep(delay)
+                delay *= 2
+                continue
+            if r.status_code == 200:
+                return r.json()
+            try:
+                msg = str((r.json().get("error") or {}).get("message", ""))
+            except ValueError:
+                msg = r.text[:200]
+            if r.status_code not in (429, 500, 502, 503, 504) or attempt == self.max_retries:
+                kind = {401: "rejected the key", 402: "needs credits", 429: "rate limit or free quota reached"}.get(
+                    r.status_code, f"error {r.status_code}")
+                raise LLMError(f"LLM provider {kind}: {msg[:200]}")
+            wait = r.headers.get("retry-after")
+            self.sleep(min(float(wait) if wait and wait.replace(".", "", 1).isdigit() else delay, 30))
+            delay *= 2
+        raise LLMError("LLM provider unavailable")
+
+
+class FallbackLLM:
+    """Use a remote model, and fall back to the offline rules for a task when the model fails
+    (rate limit, used-up free quota, outage). For live demos on free tiers: the answer still comes,
+    and its trace shows `offline-rules` as the model. The eval harness switches this off."""
+
+    def __init__(self, primary, offline):
+        self.primary, self.offline, self.enabled = primary, offline, True
+        self.name = primary.name
+        self.fallbacks = 0
+
+    def json(self, task, system, user, schema, tier="fast", context=None) -> LLMReply:
+        try:
+            return self.primary.json(task, system, user, schema, tier, context)
+        except LLMError:
+            if not self.enabled or task not in self.offline.handlers:
+                raise
+            self.fallbacks += 1
+            return self.offline.json(task, system, user, schema, tier, context)
+
+
 # --------------------------------------------------------------------------- offline / scripted
 class OfflineLLM:
     """Deterministic backend. Each task is a plain function of the structured context."""
@@ -260,13 +395,17 @@ def has_anthropic_credentials() -> bool:
 
 
 def make_llm(settings: dict, offline_handlers: dict | None = None, provider: str | None = None) -> LLM:
-    provider = provider or settings["llm"].get("provider", "auto")
+    """provider: argument > ANALYST_LLM_PROVIDER env > llm.provider in config."""
+    provider = provider or os.environ.get("ANALYST_LLM_PROVIDER") or settings["llm"].get("provider", "auto")
     if provider == "auto":
-        provider = ("anthropic" if has_anthropic_credentials() else "gemini" if gemini_api_key() else "offline")
-    if provider == "anthropic":
-        return AnthropicLLM(settings)
-    if provider == "gemini":
-        return GeminiLLM(settings)
+        provider = ("anthropic" if has_anthropic_credentials() else "gemini" if gemini_api_key()
+                    else "openrouter" if os.environ.get("OPENROUTER_API_KEY") else "offline")
+    remote = {"anthropic": AnthropicLLM, "gemini": GeminiLLM, "openrouter": OpenRouterLLM}.get(provider)
+    if remote is not None:
+        llm = remote(settings)
+        if settings["llm"].get("fallback_to_offline") and offline_handlers:
+            return FallbackLLM(llm, OfflineLLM(offline_handlers))
+        return llm
     if provider == "offline":
         return OfflineLLM(offline_handlers)
     raise ValueError(f"unknown llm provider {provider!r}")

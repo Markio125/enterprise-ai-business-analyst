@@ -98,7 +98,9 @@ The fix was not prompt tuning but more of the central principle: the parse must 
 
 The run also caught a harness flaw: the judge saw only raw query rows, not the computed analysis the facts come from, so it marked correct numbers as unsupported.
 
-The one remaining Gemini failure moves between runs. The parse is not deterministic, and the guards don't yet cover every reading. Eval results now record the parse, so the next failure can be traced.
+The one remaining Gemini failure moved between runs; the last was EV02. Instead of guessing, I fed every plausible reading of that question (270 combinations of question type, compare, grain and breakdowns) through the normaliser. Two readings left no comparison period, exactly the failure seen. Now all 270 give the same driver analysis, with an end-to-end test under six of them. The general lesson: make the outcome invariant to the model's choices wherever the question's words settle them, and test across the whole space of readings, not the one the model happened to give.
+
+**OpenRouter** (free models) is wired in for demos, with a hard call cap and an offline fallback for rate limits. Tested live with 6 calls: the main question and EV02 were both correct, and both were worded by the model under the grounding check, which rejected one rewording that introduced a number.
 
 The graders are tested to fail wrong answers, not only to pass right ones: a changed expected value, the wrong status, a reference query over the raw (duplicated) table, a simulated DELETE leaking past the gate, and a low judge score all flip the grade.
 

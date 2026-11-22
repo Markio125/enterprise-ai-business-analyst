@@ -6,10 +6,10 @@ An AI analyst for payments data. You ask a business question in plain English (*
 - [**Design write-up**](docs/WRITEUP.md): what was built, the key decisions, how each failure scenario is handled, results and limitations.
 - [**Architecture**](docs/ARCHITECTURE.md): component, lifecycle and data-access diagrams.
 - **Eval reports:** [offline](evals/REPORT.md) 20/20 known-answer cases; [Gemini](evals/gemini/REPORT.md) 19/20 with the LLM judge; EV01–EV15 meet the 90% gate on both.
-- [**Demo script**](docs/DEMO.md): a 10-minute walkthrough. `python scripts/demo.py` plays it in a terminal.
+- [**Demo script**](docs/DEMO.md): a 10-minute walkthrough (`python scripts/demo.py` plays it in a terminal); [**3½-minute talk**](docs/DEMO_TALK.md) to read while presenting.
 - [Full specification](docs/SPEC.md).
 
-Runs fully offline with no API key (rule-based parsing and wording). With `ANTHROPIC_API_KEY` (Claude) or `GEMINI_API_KEY` (Gemini) set, the model parses questions, writes SQL for custom requests and words answers. The safety gate, analysis and number checks are the same either way.
+Runs fully offline with no API key (rule-based parsing and wording). With a Claude, Gemini or OpenRouter key set (in `.env` for the server), the model parses questions, writes SQL for custom requests and words answers. The safety gate, analysis and number checks are the same either way.
 
 ## Status
 
@@ -62,6 +62,9 @@ python scripts/ask.py --user u_west "Top 5 merchants by GMV last month"
 
 # the UI and the HTTP API (segments 7-8): open http://localhost:8000 ; API docs at http://localhost:8000/docs
 uvicorn analyst.api:app --port 8000
+# to demo with a real model, put the key in .env (gitignored; the server reads it at startup):
+#   OPENROUTER_API_KEY=...        (or GEMINI_API_KEY / ANTHROPIC_API_KEY)
+#   ANALYST_LLM_PROVIDER=openrouter
 ```
 
 `python scripts/generate_data.py --scale 0.2` builds a smaller warehouse for quick iteration. Output is deterministic for a given seed and config.
@@ -249,12 +252,14 @@ COMPOSITION + GROUNDING_CHECK (segment 6) ──▶ ANSWERED | ANSWERED_LOW_CONF
 
 ### LLM backends
 
-[`analyst/llm.py`](analyst/llm.py) has one interface, `llm.json(task, system, user, schema, tier)`, with four implementations:
+[`analyst/llm.py`](analyst/llm.py) has one interface, `llm.json(task, system, user, schema, tier)`, with these implementations:
 
 | Backend | When | Notes |
 |---|---|---|
 | `AnthropicLLM` | `llm.provider: auto` with `ANTHROPIC_API_KEY` (or an `ant auth login` profile) set, or `--llm anthropic` | Official `anthropic` SDK with structured outputs (`output_config.format`). The stable system prompt is cached (`cache_control`). Effort is `low` for parsing and `medium` for SQL. Opus calls opt into the server-side refusal fallback (`fallbacks: "default"`). Refusals and `max_tokens` cut-offs raise, so the pipeline fails gracefully. |
 | `GeminiLLM` | `GEMINI_API_KEY` (Google AI Studio) set and no Anthropic credentials, or `--llm gemini` | Gemini REST API through `httpx` (no extra SDK) with `responseJsonSchema` structured output. Retries 429/5xx with the server's suggested delay; a used-up daily quota fails at once. Models in `llm.gemini` (`gemini-3.1-flash-lite` for parsing, `gemini-3.5-flash` for SQL, wording and the eval judge). Thinking tokens count as output. |
+| `OpenRouterLLM` | `OPENROUTER_API_KEY` set (after Anthropic and Gemini), or `ANALYST_LLM_PROVIDER=openrouter`, or `--llm openrouter` | OpenAI-compatible REST through `httpx`, with `response_format: json_schema` and `require_parameters` routing. `llm.openrouter.models_*` lists free models in order, so OpenRouter falls through to the next when one is rate-limited. **Hard call cap** per process: `max_calls` / `OPENROUTER_MAX_CALLS`; every request counts, retries included. |
+| `FallbackLLM` | wraps any remote backend when `llm.fallback_to_offline: true` | A failed call (rate limit, used-up free quota, outage) is answered by the offline rules for that task, so a live demo keeps working. The trace shows `offline-rules` as the model, and the answer reads "worded by offline (fallback)". The eval harness switches it off, so evals measure the model itself. |
 | `OfflineLLM` | no credentials (the default here) | Deterministic rule-based parser in [`analyst/intent.py`](analyst/intent.py). It reads the structured context rather than the prompt and covers the demo and eval questions. It cannot write custom SQL and says so. |
 | `ScriptedLLM` | tests | Replays canned replies (including invalid JSON and dangerous SQL) to drive retries, the repair loop and the gate. |
 
@@ -467,7 +472,9 @@ Admins can also run the suite from the UI sidebar or with `POST /api/v1/evals/ru
 
 The first Gemini run exposed the parse problems in the table under [LLM backends](#llm-backends). It also exposed a harness flaw: the judge saw only the first 20 rows of each query, not the computed analysis behind the facts, so it marked correct numbers as unsupported. Both were fixed, and every fix has a regression test ([`tests/test_gemini.py`](tests/test_gemini.py)). The offline run is unchanged at 20/20.
 
-The remaining Gemini failure varies between runs. A run before the final one failed only EV13 (fixed since). The final run failed only EV02, which then passed three times out of three when repeated. The model's parse is not deterministic, and the guards don't yet cover whatever reading it produced that time. Each eval result now records the parsed intent, and the report prints it for every failure, so the next variation can be diagnosed. Gemini ran on the free tier, so cost is $0 and latency includes waits for rate limits. The reasoning model moved from `gemini-3-flash-preview` to `gemini-3.5-flash` after the first run, because the preview model's daily free quota ran out. Claude has not been evaluated: the Anthropic key available had no API credits.
+**EV02 was flaky on Gemini; now it isn't.** The final Gemini run's failure varied between runs. Feeding `normalize` every plausible reading of the EV02 question (270 combinations of question type, compare, grain and breakdowns) showed two the guards missed. A COMPARISON or DISTRIBUTION reading of "What happened to…" left no comparison period, which leaves only a KPI tile, exactly the failure seen. Both are now treated as driver analyses unless the question really compares segments ("UPI vs cards"). An invented comparison phrase is ignored. All 270 readings now give the same analysis, and an end-to-end test runs the pipeline under six of them ([`tests/test_gemini.py`](tests/test_gemini.py)). Gemini's quota was used up, so the full Gemini suite has not been rerun after this fix.
+
+Before that fix, the remaining Gemini failure varied between runs. A run before the final one failed only EV13 (fixed since). The final run failed only EV02, which then passed three times out of three when repeated. The model's parse is not deterministic, and the guards don't yet cover whatever reading it produced that time. Each eval result now records the parsed intent, and the report prints it for every failure, so the next variation can be diagnosed. Gemini ran on the free tier, so cost is $0 and latency includes waits for rate limits. The reasoning model moved from `gemini-3-flash-preview` to `gemini-3.5-flash` after the first run, because the preview model's daily free quota ran out. Claude has not been evaluated: the Anthropic key available had no API credits.
 
 These cases test that the system finds the planted answers end to end. They are not a measure of generalisation to new phrasings; see the [write-up](docs/WRITEUP.md#evaluation).
 
@@ -536,6 +543,7 @@ docs/SPEC.md        full system specification
 - The UI is a demo client, not a hardened product. There is no real sign-in (anyone who can reach the server can pick any user), and charts are hand-drawn SVG rather than a charting library, to keep it dependency-free.
 - Mock authentication: `X-User-Id` must be replaced by real identity (SSO/JWT) before any deployment. Event streams are kept in process memory (replayed from the metadata DB after a restart), so the API runs as a single process; several processes would need a shared event bus.
 - Grounding checks that each number traces to a computed value. It does not check that the surrounding claim is right (e.g. a rewrite that attaches a correct number to the wrong segment). Keeping the facts' structure fixed and only letting the model reword limits that risk; the eval checks also assert key claims.
+- OpenRouter was tested live with 6 calls (free models): the main demo question with its clarification, and EV02, both correct and both worded by the model under the grounding check. The full eval suite was not run on OpenRouter, to save the free quota for demos. Free models have per-minute and daily request limits; when they hit, the offline fallback answers instead.
 - The Gemini runs used the free tier: rate-limit waits inflate latency, daily quotas cut the judge short, and cost shows $0 because no Gemini prices are configured.
 - The eval cases come from the same planted anomalies the analysis was built around. They show the system finds known answers end to end, not that it generalises; a held-out question set is the next step.
 - There is no recorded demo video. [`docs/DEMO.md`](docs/DEMO.md) and `scripts/demo.py` give a reproducible walkthrough instead.

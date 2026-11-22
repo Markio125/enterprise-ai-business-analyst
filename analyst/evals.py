@@ -530,6 +530,8 @@ def run_suite(analyst: Analyst, cases: list[dict] | None = None, store=None, tru
     cases = cases if cases is not None else load_cases()
     truth = truth if truth is not None else json.loads(TRUTH.read_text(encoding="utf-8"))
     pricing = analyst.settings.get("llm", {}).get("pricing", {})
+    if hasattr(analyst.llm, "enabled"):          # measure the model itself: no silent offline fallback
+        analyst.llm.enabled = False
     t0 = time.perf_counter()
     results = []
     for c in cases:

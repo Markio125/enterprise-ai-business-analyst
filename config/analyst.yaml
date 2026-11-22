@@ -47,6 +47,8 @@ llm:
   # anthropic: Claude via the official SDK (needs ANTHROPIC_API_KEY or an `ant auth login` profile).
   # offline:   deterministic rule-based backend; no network, used by tests and when no key is set.
   # gemini:    Google Gemini via REST (needs GEMINI_API_KEY from Google AI Studio).
+  # openrouter: any OpenRouter model (needs OPENROUTER_API_KEY).
+  # The env var ANALYST_LLM_PROVIDER overrides this (the server reads both from the gitignored .env).
   # auto:      anthropic when Anthropic credentials are present, else gemini when GEMINI_API_KEY is set, else offline.
   provider: auto
   model_reasoning: claude-opus-5-5      # SQL generation / repair
@@ -57,6 +59,14 @@ llm:
   refusal_fallback: default             # server-side fallback on safety refusals (Opus only); null to disable
   max_json_retries: 2                   # malformed / semantically invalid LLM output -> retry with the error
   max_sql_repair_attempts: 2            # validator / executor error -> regenerate
+  fallback_to_offline: true             # a failed remote call (rate limit, free quota) answers from the offline rules
+  openrouter:
+    models_reasoning: [nvidia/nemotron-3.5-super-vl:free, baidu/ernie-5.5-flash-preview:free, inclusionai/ling-3.2-flash:free]
+    models_fast: [baidu/ernie-5.5-flash-preview:free, inclusionai/ling-3.2-flash:free, nvidia/nemotron-3.5-super-vl:free]
+    max_output_tokens: 8000
+    max_retries: 1                      # each retry is a real call and counts against max_calls
+    max_calls: null                     # hard cap per process; OPENROUTER_MAX_CALLS overrides
+    timeout_s: 120
   gemini:                               # used when provider is gemini
     model_reasoning: gemini-3.5-flash         # SQL generation, answer wording, eval judge
     model_fast: gemini-3.1-flash-lite         # question parsing

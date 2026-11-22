@@ -40,6 +40,12 @@ _NOT_VALUES = {"the", "each", "every", "which", "by", "per", "my", "our", "all",
 RECONCILIATION_METRICS = ["gmv_inr", "finance_gross_inr", "settled_gmv_inr"]
 _WHY = r"\b(why|what happened|what caused|what changed|explain|reason for|how come)\b"
 _TREND_WORDS = r"\b(trend|trending|trends|over time|daily|weekly|monthly|by day|by week|by month|per day|each day)\b"
+# A request to change data, whatever the model says (it can only add the flag, never clear it)
+_DATA_CHANGE = re.compile(
+    r"^\s*(?:please\s+)?(?:(?:can|could|would|will)\s+you\s+(?:please\s+)?)?"
+    r"(?:delete|remove|purge|wipe|truncate|drop|update|insert|alter|overwrite|modify|clean up|dedupe|deduplicate)\b"
+    r"|\b(?:drop|truncate|alter)\s+table\b|\bdelete\s+from\b|\binsert\s+into\b|\bupdate\s+\w+\s+set\b",
+    re.IGNORECASE)
 GRAIN_CUES = {
     "hour": r"\b(hourly|by hour|per hour|each hour|hour by hour|hour wise)\b",
     "day": r"\b(daily|by day|per day|each day|day by day|day wise|every day)\b",
@@ -58,6 +64,14 @@ def scope_value_from_text(dim: str, question: str, model: SemanticModel | None =
             continue
         return val.upper()
     return None
+
+
+def _phrase_in(phrase: str, question: str) -> bool:
+    """A comparison phrase counts if most of its words occur in the question (models paraphrase a little)."""
+    words = [w for w in re.findall(r"[a-z0-9]+", phrase.lower()) if w not in {"the", "vs", "versus", "to", "with",
+                                                                              "compared", "than", "a"}]
+    q = set(re.findall(r"[a-z0-9]+", question.lower()))
+    return bool(words) and sum(w in q for w in words) / len(words) >= 0.6
 
 
 def _plain(text: str) -> str:
@@ -296,6 +310,9 @@ def normalize(raw: dict, question: str, model: SemanticModel, catalog: dict,
 
     # Deterministic guards: the parse must agree with the question's own words, whatever the model said
     low = question.lower()
+    if not it.requests_data_change and _DATA_CHANGE.search(question):
+        it.requests_data_change = True
+        it.notes.append("The question asks to change data.")
     for dim in SCOPE_VALUE_PATTERNS:
         val = scope_value_from_text(dim, question, model)
         if val and dim in model.dimensions and not any(f["dimension"] == dim for f in it.filters):
@@ -305,9 +322,15 @@ def normalize(raw: dict, question: str, model: SemanticModel, catalog: dict,
     if it.grain in GRAIN_CUES and not re.search(GRAIN_CUES[it.grain], _plain(question)):
         it.notes.append(f"Ignored a {it.grain}-level grain: the question doesn't ask for one.")
         it.grain = "none"
-    if it.metrics and it.question_type in ("TREND", "RANKING", "LOOKUP") and re.search(_WHY, low):
+    segment_comparison = any(len(f["values"]) > 1 for f in it.filters)     # "UPI vs cards" stays a comparison
+    if (it.metrics and re.search(_WHY, low) and not segment_comparison
+            and it.question_type in ("TREND", "RANKING", "LOOKUP", "COMPARISON", "DISTRIBUTION")):
         it.notes.append(f"Treated as a driver analysis ('why' question), not {it.question_type}.")
         it.question_type = "DRIVER_ANALYSIS"
+    if it.compare == "explicit" and it.comparison_phrase and not _phrase_in(it.comparison_phrase, question):
+        it.notes.append(f"Ignored the comparison {it.comparison_phrase!r}: the question doesn't say it.")
+        it.comparison_phrase = None
+        it.compare = "previous_period" if it.question_type == "DRIVER_ANALYSIS" else "none"
     if it.question_type == "DRIVER_ANALYSIS" and it.compare == "none":
         it.compare = "previous_period"
     if (it.question_type == "TREND" and it.grain == "none" and not re.search(_TREND_WORDS, low)

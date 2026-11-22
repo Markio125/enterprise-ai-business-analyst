@@ -22,6 +22,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from .service import AnalystService, Conflict, Forbidden, NotFound
+from .settings import load_env
 from .store import dumps
 
 API = "/api/v1"
@@ -64,6 +65,7 @@ def create_app(service: AnalystService | None = None) -> FastAPI:
 
     def svc() -> AnalystService:
         if state["service"] is None:
+            load_env()                       # .env (gitignored): provider key, ANALYST_LLM_PROVIDER
             state["service"] = AnalystService()
         return state["service"]
 

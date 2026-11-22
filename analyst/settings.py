@@ -1,12 +1,32 @@
 """Loads config/analyst.yaml."""
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_SETTINGS = ROOT / "config" / "analyst.yaml"
+
+
+def load_env(path: Path | str | None = None) -> list[str]:
+    """Read KEY=VALUE lines from the repo's .env (gitignored) into the environment, without overriding
+    variables that are already set. Returns the names loaded (never the values)."""
+    p = Path(path) if path else ROOT / ".env"
+    if not p.exists():
+        return []
+    loaded = []
+    for line in p.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        k, _, v = line.partition("=")
+        k, v = k.strip(), v.strip().strip('"').strip("'")
+        if k and k not in os.environ:
+            os.environ[k] = v
+            loaded.append(k)
+    return loaded
 
 
 def load_settings(path: Path | str = DEFAULT_SETTINGS, **overrides) -> dict:
