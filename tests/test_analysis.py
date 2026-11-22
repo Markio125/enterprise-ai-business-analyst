@@ -16,6 +16,8 @@ from analyst.pipeline import OFFLINE_HANDLERS, Analyst, Session
 from analyst.semantic import Filter, QuerySpec, SemanticModel, SemanticError
 from analyst.sqlsafety import bind_params
 
+ANSWERED = ("ANSWERED", "ANSWERED_LOW_CONFIDENCE")
+
 
 # ----------------------------------------------------------------------------- pure methods
 def _random_parts(rng, segs=6):
@@ -147,7 +149,7 @@ def test_driver_analysis_end_to_end(analyst):
     s = Session("u_exec", clarifications={"METRIC_DEFINITION:success_rate": "a"})
     r = analyst.ask("Why did success rate drop in the last two weeks?", "u_exec", s)
     a = r.analysis
-    assert r.state == "ANALYZED" and a is not None
+    assert r.state in ANSWERED and a is not None
     assert a.headline["delta_pp"] < 0 and a.headline["significant"]
     assert all(abs(d.totals["residual_pp"]) < 1e-9 for d in a.decompositions if d.method == "MIX_RATE_DECOMPOSITION")
     assert a.interpretation_code == "MIX_DOMINANT" and a.drivers[0]["segment"] == "UPI_COLLECT"
@@ -160,7 +162,7 @@ def test_driver_analysis_end_to_end(analyst):
 def test_drilldowns_respect_scope(analyst):
     s = Session("u_west", clarifications={"METRIC_DEFINITION:success_rate": "a"})
     r = analyst.ask("Why did success rate drop in the last two weeks?", "u_west", s)
-    assert r.state == "ANALYZED"
+    assert r.state in ANSWERED
     for x in r.steps:
         if x.status == "OK":
             assert any("WEST" in p for p in x.rls), x.purpose
@@ -199,5 +201,5 @@ def test_analysis_failure_keeps_the_query_results(analyst, monkeypatch):
         raise RuntimeError("bad analysis")
     monkeypatch.setattr(analyst.analyzer, "analyze", boom)
     r = analyst.ask("What was GMV last week?", "u_exec")
-    assert r.state == "ANALYZED" and r.analysis is None and r.steps and r.steps[0].rows
+    assert r.state == "ANSWERED_LOW_CONFIDENCE" and r.analysis is None and r.steps and r.steps[0].rows
     assert any(t["stage"] == "ANALYSIS" and t["status"] == "ERROR" for t in r.trace)

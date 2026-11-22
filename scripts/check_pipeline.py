@@ -16,6 +16,7 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from analyst.composer import check_rules  # noqa: E402
 from analyst.pipeline import Analyst, PipelineResult, Session  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -26,6 +27,10 @@ def first_value(r: PipelineResult, period: str | None = None, sid: str | None = 
         if (sid and s.step_id == sid) or (not sid and (period is None or s.period == period)):
             return s.rows[0][0] if s.rows else None
     return None
+
+
+def text(r: PipelineResult) -> str:
+    return (r.answer.to_markdown() if r.answer else "").lower().replace("_", " ")
 
 
 def run_case(a: Analyst, user: str, questions: list[str], answers: dict | None = None,
@@ -67,7 +72,7 @@ def main(provider: str | None = "offline") -> int:
     r, turns, sess = run_case(a, "u_exec", ["Why did our payment success rate drop in the last two weeks?"],
                               {"METRIC_DEFINITION:success_rate": "a"})
     p1, p0 = first_value(r, "P1"), first_value(r, "P0")
-    check("EV01 executed after one clarification", r.state == "ANALYZED" and turns == 1, (r.state, turns))
+    check("EV01 executed after one clarification", r.state == "ANSWERED" and turns == 1, (r.state, turns))
     check("EV01 periods match ground truth", r.plan and r.plan.periods == a1["periods"], r.plan and r.plan.periods)
     check("EV01 headline P0/P1 match ground truth",
           p0 is not None and round(p0, 4) == a1["overall"]["sr_p0"] and round(p1, 4) == a1["overall"]["sr_p1"],
@@ -107,10 +112,21 @@ def main(provider: str | None = "offline") -> int:
     ids = {x.check_id for x in (an.dq if an else [])}
     check("EV01 data-quality caveats: Oct 5 duplicates handled, Oct 28 excluded",
           {"DQ01_DUPLICATES", "DQ05_LATE_ARRIVING"} <= ids, ids)
+    t = text(r)
+    check("EV01 answer: mentions mix and UPI collect, never claims UPI collect declined, HIGH confidence",
+          "mix" in t and "upi collect" in t and "upi collect success rate declined" not in t
+          and r.answer.confidence["level"] == "HIGH", (r.answer.headline, r.answer.confidence))
+    check("EV01 answer grounded (every number traced) and composition rules hold",
+          r.answer.grounding.get("passed") and r.answer.grounding.get("checked", 0) >= 10 and not check_rules(r.answer),
+          (r.answer.grounding, check_rules(r.answer)))
+    check("EV01 charts: KPI, trend with P0/P1 bands, waterfall, share bars",
+          {"kpi", "line", "waterfall", "grouped_bar"} <= {c["type"] for c in r.answer.charts}
+          and any(a_["type"] == "period_band" for c in r.answer.charts if c["type"] == "line"
+                  for a_ in c.get("annotations", [])), [c["type"] for c in r.answer.charts])
 
     # EV15: follow-up drill-down inherits metric, periods and adds the filter
     r2 = a.ask("Drill into UPI Collect by merchant", "u_exec", sess)
-    check("EV15 follow-up inherits periods and metric", r2.state == "ANALYZED" and r2.plan.periods == a1["periods"]
+    check("EV15 follow-up inherits periods and metric", r2.state == "ANSWERED" and r2.plan.periods == a1["periods"]
           and r2.metrics == r.metrics, (r2.state, r2.plan and r2.plan.periods))
     check("EV15 adds the UPI_COLLECT filter and merchant breakdown",
           {"dimension": "sub_method", "op": "=", "values": ["UPI_COLLECT"]} in r2.intent.filters
@@ -123,7 +139,7 @@ def main(provider: str | None = "offline") -> int:
     a2 = truth["A2_issuer_outage"]
     r, _, _ = run_case(a, "u_exec", [a2["question"]], {})
     check("EV02 card question: CARD filter, issuer breakdown, single day",
-          r.state == "ANALYZED" and r.window.start.isoformat() == a2["date"]
+          r.state == "ANSWERED" and r.window.start.isoformat() == a2["date"]
           and {"dimension": "payment_method", "op": "=", "values": ["CARD"]} in r.intent.filters
           and "issuer_bank" in {s.dimension for s in r.steps}, (r.state, r.window and r.window.label))
     an = r.analysis
@@ -134,6 +150,9 @@ def main(provider: str | None = "offline") -> int:
           and an.failure_codes and an.failure_codes["top_code"] == a2["top_card_response_code"]
           and any(x.code == "ISSUER_OUTAGE" for x in an.hypotheses),
           an and (an.drivers[:1], hw, an.failure_codes and an.failure_codes["top_code"]))
+    t = text(r)
+    check("EV02 answer mentions 18:00 and 23:00 and Meridian", "18:00" in t and "23:00" in t and "meridian" in t,
+          r.answer.headline)
 
     # EV03: restricted metric
     r, _, _ = run_case(a, "u_ops", ["Show me MDR revenue by merchant last month"])
@@ -149,6 +168,8 @@ def main(provider: str | None = "offline") -> int:
     check("EV04 top-5 WEST merchants match ground truth", got == want, got)
     check("EV04 scope disclosed and RLS injected", any("region = WEST" in d for d in r.disclosures)
           and r.steps and r.steps[0].rls, r.disclosures)
+    check("EV04 answer states the scope in its definitions", "WEST" in r.answer.definitions_used.get("scope", ""),
+          r.answer.definitions_used)
     r, _, _ = run_case(a, "u_west", ["GMV for the NORTH region last month"], {})
     check("scope: WEST manager asking about NORTH -> REFUSED_ACCESS", r.state == "REFUSED_ACCESS", r.state)
     r, _, _ = run_case(a, "u_west", ["GMV for merchant 'Zzyzx Foods' last month"], {})
@@ -168,6 +189,8 @@ def main(provider: str | None = "offline") -> int:
     check("EV07 duplicate caveat (DQ01) with dedup mitigation",
           r.analysis is not None and any(x.check_id == "DQ01_DUPLICATES" and x.auto_mitigation == "USED_DEDUP_VIEW"
                                          for x in r.analysis.dq), r.analysis and [x.check_id for x in r.analysis.dq])
+    check("EV07 answer: 8,189 with the duplicate caveat", "8,189" in r.answer.headline
+          and any(c["code"] == "DQ01_DUPLICATES" for c in r.answer.caveats), r.answer.headline)
 
     # EV08: reconciliation pulls every source the finance user may see
     a6 = truth["A6_source_disagreement"]
@@ -187,6 +210,10 @@ def main(provider: str | None = "offline") -> int:
           got)
     check("EV08 reconciliation fully explained (|residual| < INR 1) + recommendation",
           rec is not None and abs(rec["residual_inr"]) < 1 and rec["recommendation"], rec and rec["residual_inr"])
+    t = text(r)
+    check("EV08 answer names the timezone boundary and reversed settlements, with a waterfall",
+          "utc" in t and "reversed" in t and any(c["type"] == "waterfall" for c in r.answer.charts)
+          and r.answer.grounding.get("passed"), r.answer.headline)
 
     # EV09 / EV10: vague time asks; definition ambiguity asks or is disclosed
     r, _, _ = run_case(a, "u_exec", ["How is success rate trending lately?"])
@@ -196,19 +223,22 @@ def main(provider: str | None = "offline") -> int:
     check("EV10 bare 'success rate' -> definition clarification", r.state == "AWAITING_CLARIFICATION"
           and r.ambiguity.items[0].type == "METRIC_DEFINITION", r.state)
     r, _, _ = run_case(a, "u_exec", ["What's our success rate?"], {})
-    check("EV10 default window is disclosed", r.state == "ANALYZED" and any("No period given" in d or "default" in d
+    check("EV10 default window is disclosed", r.state == "ANSWERED" and any("No period given" in d or "default" in d
                                                                             for d in r.disclosures + [r.window.label]),
           r.disclosures)
 
     # EV11: as-of excludes the incomplete day
     r, _, _ = run_case(a, "u_exec", ["Did success rate drop yesterday?"], {})
-    check("EV11 'yesterday' resolves against the last complete day", r.state == "ANALYZED"
+    check("EV11 'yesterday' resolves against the last complete day", r.state == "ANSWERED"
           and r.window.end.isoformat() < truth["A7_late_data"]["date"], r.window and r.window.label)
     an = r.analysis
     check("EV11 no significant drop claimed; late-arriving caveat present",
           an is not None and not an.headline.get("significant")
           and any(x.code == "PREMISE_NOT_SUPPORTED" for x in an.hypotheses)
           and any(x.check_id == "DQ05_LATE_ARRIVING" for x in an.dq), an and an.headline)
+    t = text(r)
+    check("EV11 answer corrects the premise and never says 'dropped significantly'",
+          r.answer.headline.startswith("No") and "dropped significantly" not in t, r.answer.headline)
 
     # EV12: too many rows -> narrowing with options; choosing them leads to a runnable plan
     q12 = "Show hourly success rate for every merchant for the past year"
@@ -216,7 +246,7 @@ def main(provider: str | None = "offline") -> int:
     check("EV12 hourly x merchant x year -> AWAITING_NARROWING with options",
           r.state == "AWAITING_NARROWING" and len(r.narrowing["options"]) >= 2, r.state)
     r, _, _ = run_case(a, "u_exec", [q12], {}, narrowing=["c", "a"])
-    check("EV12 narrowed to top merchants + weekly -> executed", r.state == "ANALYZED", (r.state, r.message[:80]))
+    check("EV12 narrowed to top merchants + weekly -> executed", r.state == "ANSWERED", (r.state, r.message[:80]))
 
     # EV13: null merchant keys show up as their own bucket
     r, _, _ = run_case(a, "u_exec", ["GMV by merchant segment for Oct 18-20"], {})
@@ -226,10 +256,13 @@ def main(provider: str | None = "offline") -> int:
           got == truth["A5_null_merchant"]["eval_EV13_gmv_by_segment"], got)
     check("EV13 null-merchant caveat (DQ02) present", r.analysis is not None and any(
         x.check_id == "DQ02_NULL_KEYS" for x in r.analysis.dq), r.analysis and [x.check_id for x in r.analysis.dq])
+    check("EV13 answer: unknown bucket shown, caveat stated, confidence MEDIUM",
+          "unknown" in text(r) and any(c["code"] == "DQ02_NULL_KEYS" for c in r.answer.caveats)
+          and r.answer.confidence["level"] == "MEDIUM", r.answer.confidence)
 
     # EV14: acquirer driver question
     r, _, _ = run_case(a, "u_exec", [truth["A3_acquirer_degradation"]["question"]], {})
-    check("EV14 CNP filter + acquirer breakdown, late September", r.state == "ANALYZED"
+    check("EV14 CNP filter + acquirer breakdown, late September", r.state == "ANSWERED"
           and {"dimension": "flow", "op": "=", "values": ["CARD_NOT_PRESENT"]} in r.intent.filters
           and "acquirer" in {s.dimension for s in r.steps} and r.window.start.month == 9, r.state)
     an = r.analysis
@@ -239,6 +272,8 @@ def main(provider: str | None = "offline") -> int:
           and hyp is not None and "timeout" in hyp.text.lower()
           and any(x.follows_from == hyp.id and "routing" in x.text.lower() for x in an.recommendations),
           an and (an.drivers[:1], [x.code for x in an.hypotheses]))
+    check("EV14 answer mentions timeouts and Acquirer Beta", "timeout" in text(r) and "acquirer beta" in text(r),
+          r.answer.headline)
 
     # unknown metric / off-topic
     r, _, _ = run_case(a, "u_exec", ["What is our NPS?"])

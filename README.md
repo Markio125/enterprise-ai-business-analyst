@@ -13,8 +13,8 @@ The full design is in [`docs/SPEC.md`](docs/SPEC.md).
 | 3 | **SQL safety**: sqlglot validator (S01–S16), row-level security rewrite, cost guard, sealed read-only executor | ✅ done |
 | 4 | **LLM pipeline**: parse → access pre-check → ambiguity check (probes) → plan → SQL generation → repair loop | ✅ done |
 | 5 | **Analysis engine**: mix/rate decomposition, driver ranking, drill-down, data-quality checks, reconciliation, hypotheses | ✅ done |
-| 6 | Answer composer: facts / hypotheses / recommendations, number grounding, confidence | ⏳ next |
-| 7 | API (FastAPI + SSE) + metadata DB | ⬜ |
+| 6 | **Answer composer**: facts / hypotheses / recommendations, number grounding, confidence, chart specs | ✅ done |
+| 7 | API (FastAPI + SSE) + metadata DB | ⏳ next |
 | 8 | UI | ⬜ |
 | 9 | Eval harness, demo, write-up | ⬜ |
 
@@ -29,7 +29,7 @@ python scripts/generate_data.py   # builds data/warehouse.duckdb (~1.05M attempt
 python scripts/verify_data.py     # checks every planted anomaly, writes fixtures/ground_truth.json
 python scripts/check_semantic.py  # validates the semantic layer + policies, re-derives the ground truth through it
 python scripts/check_safety.py    # ground truth through the SQL gate + an attack catalog (34 checks)
-python scripts/check_pipeline.py  # the SPEC eval questions through pipeline + analysis, vs ground truth (43 checks)
+python scripts/check_pipeline.py  # the SPEC eval questions end to end (pipeline, analysis, answer), vs ground truth (53 checks)
 pytest -q                         # fast tests at reduced scale
 ```
 
@@ -204,7 +204,8 @@ ACCESS_PRECHECK ── restricted metric, out-of-scope filter ▶ REFUSED_ACCESS
 AMBIGUITY_CHECK ── material ambiguity (probe values shown) ▶ AWAITING_CLARIFICATION ─ answer ─▶ re-run
 PLANNING ── result larger than the row cap ─────────▶ AWAITING_NARROWING ─ option ─▶ re-run
 SQL_GENERATION ⇄ VALIDATION ⇄ EXECUTION (repair loop ≤ 2)
-DQ_CHECK + ANALYSIS (segment 5) ──▶ ANALYZED | ANSWERED_WITH_DQ_BLOCK   (hand-off to segment 6)
+DQ_CHECK + ANALYSIS (segment 5)
+COMPOSITION + GROUNDING_CHECK (segment 6) ──▶ ANSWERED | ANSWERED_LOW_CONFIDENCE | ANSWERED_WITH_DQ_BLOCK
 ```
 
 **LLM proposes, code disposes.**
@@ -277,6 +278,57 @@ What it finds on the planted anomalies (all asserted in `scripts/check_pipeline.
 - **Parameter binding order.** `bind_params` filled `?` placeholders in breadth-first order. With three or more conditions, values could bind to the wrong placeholders: an error when the types differed, silently wrong filters when they matched. It now follows text order, with a regression test against hand-written SQL.
 - **Warnings no longer stop validation.** A failed *warning* check (S13/S14/S16) used to stop validation before the row-level-security rewrite. The executor then refused the query, so it failed closed: valid queries simply couldn't run. Warnings now never short-circuit. As a guard, a result that skipped the rewrite is never sealed.
 
+## Answer composer (segment 6)
+
+[`analyst/composer.py`](analyst/composer.py) produces the SPEC 15.1 answer for every question. Waiting, refusal and direct answers get a minimal answer, with options or alternatives as follow-ups.
+
+1. **Deterministic draft.** It contains:
+   - a headline written for the question type, and the premise corrected when the data contradicts it ("No — success rate did not meaningfully drop…");
+   - facts, each citing the query steps it came from;
+   - hypotheses with a confidence level and a "how to validate" step;
+   - recommendations that reference them, with an impact estimate, effort and an owner hint;
+   - caveats: data-quality issues, assumed interpretations ("I assumed …"), and narrowing or as-of notes;
+   - definitions: metric, IST time window, row-level scope and data version;
+   - an evidence list (SQL actually executed, row-level-security predicates, data version) and suggested follow-ups.
+
+   Every number is formatted from a computed value, so the draft is grounded by construction.
+2. **Optional LLM wording** (`compose` task, reasoning tier). The model may rewrite the text but must keep the same ids and structure.
+3. **Number grounding.** Every number in the headline, facts, hypotheses and recommendations is extracted and matched against the values the queries and the analysis produced.
+   - Tolerance matches the displayed precision. %, pp, ₹ Cr / L, and sign written separately are all handled. Dates, times, ids and small counts are ignored.
+   - A rewrite with an untraceable number goes back to the model with the offending tokens, at most 2 times.
+   - After that, the verified draft wording is used, confidence drops by 0.3, and the answer says the wording could not be verified.
+4. **Confidence** (SPEC 15.3). Starts at 1.0 and is adjusted for:
+   - sample size and significance;
+   - data-quality severity: a warning that hits the analysed dimension by more than 5% costs 0.3, which is why the Oct 18–20 segment breakdown comes out MEDIUM;
+   - assumed interpretations and the clarification limit;
+   - mixed decompositions, low-volume drivers, SQL repairs and failed steps.
+
+   HIGH ≥ 0.75, MEDIUM ≥ 0.5, otherwise LOW, which gives `ANSWERED_LOW_CONFIDENCE`. The top reasons and limitations are listed.
+5. **Charts** (SPEC 16), as declarative specs with inline data:
+   - KPI tiles;
+   - a trend line with P0/P1 bands and anomaly or sale-event annotations, plus a late-data badge;
+   - a mix/rate waterfall (P0 → mix → rate → P1, summing exactly) and share-of-volume bars;
+   - hourly bars for an outage;
+   - a reconciliation waterfall (dashboard → each factor → finance ledger);
+   - horizontal bars for breakdowns and a table for rankings.
+
+`scripts/ask.py` prints the composed answer:
+
+```
+Success rate fell 1.74pp (87.3% → 85.6%) in Sep 21–30 vs Sep 11–20; Acquirer Beta degraded, with acquirer timeouts driving most of the drop.
+- Acquirer Beta (acquirer): share of volume 34.8% → 34.9%, own rate 86.6% → 82.8%; it accounts for -1.30pp (74% of the change).
+- Top rising failure: Acquirer response timeout (code ACQ_TO), 1.9% → 5.7% of attempts.
+Recommendation: Shift routing away from Acquirer Beta until its timeouts return to normal. Expected impact: +1.30pp overall.
+Confidence: HIGH · Grounding: 20 numbers checked, all traced to query results
+```
+
+The eval checks now cover each case's answer-level expectations:
+- **must-mention:** "mix" and "UPI Collect" for EV01; "18:00" and "23:00" for EV02; "timeout" for EV14;
+- **must-not-claim:** "UPI Collect success rate declined" and "dropped significantly";
+- **required caveats:** DQ01 for EV07 and DQ02 for EV13;
+- **scope disclosure:** EV04;
+- **on every answer:** grounding and the composition rules.
+
 ## Repository layout
 
 ```
@@ -299,6 +351,7 @@ analyst/
   pipeline.py       the state machine (Analyst.ask), Session, trace
   analysis.py       decomposition, driver ranking, drill-down, trend, reconciliation, hypotheses
   dq.py             data-quality checks DQ01-DQ10 (cached per window and data version)
+  composer.py       answer draft, LLM wording, number grounding, confidence, chart specs
 semantic/model.yaml     entities, measures, metrics, dimensions, ambiguous terms, glossary
 config/generator.yaml   every generator knob (volumes, rates, anomaly windows and magnitudes)
 config/policies.yaml    roles, row-level scopes, demo users
@@ -317,7 +370,8 @@ docs/SPEC.md        full system specification
 - Every `v_attempts` query scans the whole raw table: the view's deduplication window blocks filter pushdown. That is fine at 1M rows. At scale, the deduplicated table should be materialised so time filters cut the scan, and the cost guard would show the difference.
 - The time-filter rule (S07) is best-effort: any predicate on a fact's time column counts. The EXPLAIN cost guard (S12) is the backstop.
 - Data-quality checks are fixed system queries over the whole warehouse (not scoped by role). They report only rates and dates, never values or row counts.
-- Hypotheses are templates over measured patterns. They are not causal proof; the composer (segment 6) phrases them as hypotheses, with confidence.
+- Hypotheses are templates over measured patterns. They are not causal proof; answers label them as hypotheses, with confidence and a validation step.
+- Grounding checks that each number traces to a computed value. It does not check that the surrounding claim is right (e.g. a rewrite that attaches a correct number to the wrong segment). Keeping the facts' structure fixed and only letting the model reword limits that risk; the eval checks also assert key claims.
 - The offline parser is rules, tuned on the demo and eval questions. Real phrasing variety needs the Claude backend. No live Claude run is part of this commit: no API key was available here. The request shape is unit-tested against a fake client.
 - Merchant-name entity resolution is exact, then unique substring, then a fuzzy "did you mean". Names are not unique across regions; resolution only ever sees the user's scope.
 - The generator favours clarity over realism in places. For example, merchant success-rate noise is centred so the A1 campaign merchant is exactly average, which makes A1 a near-pure mix effect.

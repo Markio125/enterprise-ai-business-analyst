@@ -19,57 +19,56 @@ from analyst.pipeline import Analyst, PipelineResult, Session  # noqa: E402
 
 
 def show(r: PipelineResult, verbose: bool) -> None:
-    print(f"\n[{r.state}] {r.message}")
+    print(f"\n[{r.state}]")
     if r.ambiguity and r.ambiguity.items:
+        print(r.message)
         for it in r.ambiguity.items:
             print(f"  ? {it.key}")
             for o in it.options:
                 rec = " (recommended)" if o.id == it.recommended else ""
                 print(f"     {o.id}) {o.label}" + (f" -> {o.display}" if o.display else "") + rec)
+        return
     if r.narrowing:
+        print(r.message)
         for o in r.narrowing["options"]:
             print(f"     {o['id']}) {o['label']}")
         print("  answer with NARROWING=<id>")
-    if r.refusal:
-        print(f"  alternatives: {', '.join(r.refusal.get('alternatives', []))}")
-    if r.window:
-        print(f"  period: {r.window.start}..{r.window.end}" +
-              (f"  vs  {r.baseline.start}..{r.baseline.end}" if r.baseline else ""))
-    if r.metrics:
-        print(f"  metrics: {', '.join(r.metrics)}")
-    for d in r.disclosures:
-        print(f"  * {d}")
+        return
+    if r.answer:
+        print(r.answer.to_markdown())
+        if r.answer.charts:
+            print("\nCharts: " + ", ".join(f"{c['chart_id']} {c['type']} ({c.get('title', '')})" for c in r.answer.charts))
+        if r.answer.suggested_follow_ups:
+            print("Follow-ups: " + " | ".join(r.answer.suggested_follow_ups))
+        g = r.answer.grounding
+        if g:
+            print(f"Grounding: {g.get('checked', 0)} numbers checked, "
+                  f"{'all traced to query results' if g.get('passed') else 'unverified wording replaced'}"
+                  f" (composed by: {r.answer.composed_by})")
+    else:
+        print(r.message)
+    if not verbose:
+        return
     a = r.analysis
     if a:
-        h = a.headline or {}
-        if h.get("P0") is not None and h.get("delta_pp") is not None:
-            print(f"\n  headline: {h['P0']:.2%} -> {h['P1']:.2%} ({h['delta_pp']:+.2f}pp, "
-                  f"{'significant' if h.get('significant') else 'not significant'})")
-        if a.interpretation_code:
-            print(f"  interpretation: {a.interpretation_code} (best split: {a.best_dimension})")
+        print(f"\n  interpretation: {a.interpretation_code} (best split: {a.best_dimension})")
         for d in a.drivers[:3]:
             print(f"  driver: {d['dimension']} = {d['segment']}  {d['contribution']:+.2f} "
                   f"({d['share_of_change']:.0%} of change; mix {d.get('mix_effect_pp') or 0:+.2f}, "
                   f"rate {d.get('rate_effect_pp') or 0:+.2f})")
-        for x in a.hypotheses:
-            print(f"  {x.id} [{x.code}, {x.confidence}] {x.text}")
-        for x in a.recommendations:
-            imp = f" (~{x.expected_impact_pp:+.2f}pp)" if x.expected_impact_pp else ""
-            print(f"  {x.id} <- {x.follows_from}: {x.text}{imp}")
-        for c in a.caveats:
-            print(f"  caveat: {c}")
+    for d in r.disclosures:
+        print(f"  * {d}")
     import pandas as pd
-    for s in r.steps if verbose else []:
+    for s in r.steps:
         print(f"\n  {s.step_id} {s.purpose}  [{s.status}, {s.row_count} rows, {s.duration_ms} ms]")
         if s.error:
             print(f"     error: {s.error}")
-        if verbose and s.sql:
+        if s.sql:
             print("     " + s.sql)
         if s.rows:
             with pd.option_context("display.width", 160, "display.max_columns", 12):
                 print("     " + s.df().head(8).to_string(index=False).replace("\n", "\n     "))
-    if verbose:
-        print("\n  trace: " + " -> ".join(f"{t['stage']}:{t['status']}({t['ms']}ms)" for t in r.trace))
+    print("\n  trace: " + " -> ".join(f"{t['stage']}:{t['status']}({t['ms']}ms)" for t in r.trace))
 
 
 def main() -> int:
@@ -95,7 +94,7 @@ def main() -> int:
             print(json.dumps(r.as_dict(), indent=2, default=str))
         else:
             show(r, a.verbose)
-        return 0 if r.state in ("ANALYZED", "ANSWERED_DIRECT") else 1
+        return 0 if r.state.startswith("ANSWERED") else 1
     question = a.question
     while True:
         if not question:

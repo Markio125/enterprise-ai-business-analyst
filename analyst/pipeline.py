@@ -5,10 +5,10 @@ RECEIVED -> PARSING -> (REJECTED_UNSAFE | ANSWERED_DIRECT)
          -> AMBIGUITY_CHECK -> (AWAITING_CLARIFICATION)
          -> PLANNING -> (AWAITING_NARROWING)
          -> SQL_GENERATION / VALIDATION / EXECUTION (repair loop)
-         -> DQ_CHECK + ANALYSIS (drill-downs run through the same gate) -> ANALYZED | ANSWERED_WITH_DQ_BLOCK
+         -> DQ_CHECK + ANALYSIS (drill-downs run through the same gate)
+         -> COMPOSITION + GROUNDING_CHECK -> ANSWERED | ANSWERED_LOW_CONFIDENCE | ANSWERED_WITH_DQ_BLOCK
 
-ANALYZED is the hand-off point to the answer composer (segment 6), which adds
-COMPOSITION, the grounding check and the final ANSWERED* states.
+Every result carries an `answer` (SPEC 15.1); waiting and refusal states get a minimal one.
 Every stage appends to `trace` (stage, status, latency, tokens) for the
 "show steps" panel and the run_steps table (segment 7).
 """
@@ -21,6 +21,7 @@ from datetime import date
 from .analysis import AnalysisResult, Analyzer
 from .ambiguity import AmbiguityDetector, AmbiguityReport, apply_choices, resolve_merchants
 from .catalog import build_catalog, render_markdown
+from .composer import Answer, Composer, offline_compose
 from .dq import DataQuality
 from .executor import QueryGateway
 from .intent import INTENT_SCHEMA, PARSE_RULES, Intent, normalize, offline_parse
@@ -31,7 +32,7 @@ from .semantic import Filter, QuerySpec
 from .sqlgen import SqlGenerator
 from .timeparse import TimeParseError, TimeRange, detect_as_of, resolve
 
-TERMINAL = {"ANALYZED", "ANSWERED_WITH_DQ_BLOCK", "ANSWERED_DIRECT", "REFUSED_ACCESS", "REJECTED_UNSAFE", "FAILED"}
+TERMINAL = {"ANSWERED", "ANSWERED_LOW_CONFIDENCE", "ANSWERED_WITH_DQ_BLOCK", "ANSWERED_DIRECT", "REFUSED_ACCESS", "REJECTED_UNSAFE", "FAILED"}
 WAITING = {"AWAITING_CLARIFICATION", "AWAITING_NARROWING"}
 
 
@@ -100,6 +101,7 @@ class PipelineResult:
     trace: list[dict] = field(default_factory=list)
     llm: str = ""
     analysis: AnalysisResult | None = None
+    answer: Answer | None = None
 
     def step(self, sid: str) -> StepResult | None:
         return next((s for s in self.steps if s.step_id == sid), None)
@@ -118,6 +120,7 @@ class PipelineResult:
             "refusal": self.refusal, "narrowing": self.narrowing,
             "disclosures": self.disclosures, "trace": self.trace,
             "analysis": self.analysis.as_dict() if self.analysis else None,
+            "answer": self.answer.as_dict() if self.answer else None,
         }
 
 
@@ -140,6 +143,7 @@ class Analyst:
             self.as_of, self.as_of_evidence = detect_as_of(con, float(cfg.get("completeness_ratio", 0.85)))
         self.dq = DataQuality(con, self.settings, self.as_of, self.as_of_evidence, self.gateway.executor.data_version)
         self.analyzer = Analyzer(self.model, self.settings, self.dq)
+        self.composer = Composer(self.model, self.settings, self.llm)
         lo = con.execute("SELECT MIN(date_key) FROM v_attempts").fetchone()[0]
         self.data_start = date(lo // 10000, lo // 100 % 100, lo % 100)
         self._catalogs: dict[str, dict] = {}
@@ -441,11 +445,27 @@ class Analyst:
         msg = f"Ran {len(res.steps)} quer{'y' if len(res.steps) == 1 else 'ies'} for {window.label}."
         if failed:
             msg += f" {len(failed)} failed: " + "; ".join(f"{s.step_id} {s.error}" for s in failed)
-        if res.analysis and res.analysis.dq_block:
-            blk = next(r for r in res.analysis.dq if r.severity == "BLOCK")
-            return self._end(res, "ANSWERED_WITH_DQ_BLOCK", "I can't give a reliable answer for "
-                             f"{window.label}: {blk.impact}", trace)
-        return self._end(res, "ANALYZED", msg, trace)
+        res.message = msg
+
+        # COMPOSITION + GROUNDING_CHECK
+        t0 = time.perf_counter()
+        try:
+            res.answer = self.composer.compose(res)
+        except Exception as e:  # noqa: BLE001
+            trace("COMPOSITION", "ERROR", {"error": f"{type(e).__name__}: {e}"}, t0)
+            res.answer = Answer("ANSWERED_LOW_CONFIDENCE", msg + " (The written answer could not be composed; "
+                                "see the query results.)", confidence={"level": "LOW", "score": 0.0,
+                                                                       "reasons": [], "limitations": [str(e)]})
+            return self._end(res, res.answer.status, res.answer.headline, trace)
+        if res.analysis is None and res.answer.status == "ANSWERED":
+            res.answer.status = "ANSWERED_LOW_CONFIDENCE"
+        g = res.answer.grounding
+        trace("COMPOSITION", res.answer.status, {"by": res.answer.composed_by, "facts": len(res.answer.facts),
+                                                 "confidence": res.answer.confidence.get("level")}, t0)
+        trace("GROUNDING_CHECK", "OK" if g.get("passed", True) and not g.get("rewrite_failed") else "FALLBACK",
+              {"numbers_checked": g.get("checked"), "unmatched": g.get("unmatched"),
+               "problems": g.get("problems")}, t0)
+        return self._end(res, res.answer.status, res.answer.headline, trace)
 
     def _apply_narrowing(self, intent: Intent, changes: list[dict], res: PipelineResult) -> dict | None:
         top = None
@@ -525,6 +545,8 @@ class Analyst:
 
     def _end(self, res: PipelineResult, state: str, message: str, trace, t0=None) -> PipelineResult:
         res.state, res.message = state, message
+        if res.answer is None:
+            res.answer = self.composer.simple(res)
         trace("DONE", state, None, None)
         return res
 
@@ -540,4 +562,4 @@ def _offline_sql(ctx: dict) -> dict:
             "metrics_used": [m.ref for m in q.metrics], "assumptions": [], "expected_columns": []}
 
 
-OFFLINE_HANDLERS = {"parse": offline_parse, "sql": _offline_sql}
+OFFLINE_HANDLERS = {"parse": offline_parse, "sql": _offline_sql, "compose": offline_compose}
