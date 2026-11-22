@@ -38,8 +38,8 @@ python3 -m venv .venv
 ```
 
 What each step does:
-1. **Install** (`pip install`): about a minute.
-2. **Build the data** (`generate_data.py`): about 1M synthetic payment attempts in `data/warehouse.duckdb`, about a minute. The data is deterministic, so everyone gets the same numbers. You only do this once.
+1. **Install** (`pip install`): a few minutes, depending on your connection.
+2. **Build the data** (`generate_data.py`): about 1M synthetic payment attempts in `data/warehouse.duckdb`, in under a minute. The data is deterministic, so everyone gets the same numbers. You only do this once.
 3. **Start the server** (`uvicorn`): wait for `Uvicorn running on http://127.0.0.1:8000`.
 
 Then open **http://localhost:8000** in a browser:
