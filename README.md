@@ -11,6 +11,64 @@ An AI analyst for payments data. You ask a business question in plain English (*
 
 Runs fully offline with no API key (rule-based parsing and wording). With a Claude, Gemini or OpenRouter key set (in `.env` for the server), the model parses questions, writes SQL for custom requests and words answers. The safety gate, analysis and number checks are the same either way.
 
+## Run it on your machine
+
+**You need:** Python 3.11 or newer, Git, and about 1 GB of free disk. **No API key is needed**: without one, the app uses its built-in rule-based backend, so every feature in the demo works offline.
+
+### Windows (PowerShell)
+
+```powershell
+git clone https://github.com/Markio125/enterprise-ai-business-analyst.git
+cd enterprise-ai-business-analyst
+python -m venv .venv
+.venv\Scripts\python -m pip install -r requirements.txt
+.venv\Scripts\python scripts/generate_data.py
+.venv\Scripts\python -m uvicorn analyst.api:app --port 8000
+```
+
+### macOS / Linux
+
+```bash
+git clone https://github.com/Markio125/enterprise-ai-business-analyst.git
+cd enterprise-ai-business-analyst
+python3 -m venv .venv
+.venv/bin/python -m pip install -r requirements.txt
+.venv/bin/python scripts/generate_data.py
+.venv/bin/python -m uvicorn analyst.api:app --port 8000
+```
+
+What each step does:
+1. **Install** (`pip install`): about a minute.
+2. **Build the data** (`generate_data.py`): about 1M synthetic payment attempts in `data/warehouse.duckdb`, about a minute. The data is deterministic, so everyone gets the same numbers. You only do this once.
+3. **Start the server** (`uvicorn`): wait for `Uvicorn running on http://127.0.0.1:8000`.
+
+Then open **http://localhost:8000** in a browser:
+- Pick a user at the top right; each one has a different role and access.
+- Click an example question in the sidebar, or type your own. *"Why did our payment success rate drop in the last two weeks?"* is the main demo.
+- [docs/DEMO.md](docs/DEMO.md) walks through every scenario. The API docs are at http://localhost:8000/docs.
+
+Stop the server with `Ctrl+C`.
+
+### Optional: use a real language model
+
+Copy `.env.example` to `.env` (it's gitignored, so it's never committed) and fill in **one** key:
+- `ANTHROPIC_API_KEY` (Claude);
+- `GEMINI_API_KEY` (Google AI Studio);
+- `OPENROUTER_API_KEY` (OpenRouter, which has free models).
+
+Then restart the server. The sidebar shows which model is in use. The safety checks, the analysis and the numbers are the same with or without a model; the model only improves how questions are understood and how answers are worded. If a free model hits its rate limit, that step falls back to the built-in rules, so the app keeps working.
+
+### Troubleshooting
+
+| Problem | Fix |
+|---|---|
+| `python` not found, or the version is below 3.11 | Install Python from python.org. On Windows, `py -3.12 -m venv .venv` picks a specific version |
+| Port 8000 already in use | Add `--port 8001` and open http://localhost:8001 |
+| The page says it can't reach the API, or the server errors about the warehouse | Run `generate_data.py` first; the server needs `data/warehouse.duckdb` |
+| You'd rather activate the venv | Windows: `.venv\Scripts\Activate.ps1` (if blocked: `Set-ExecutionPolicy -Scope Process Bypass`). macOS/Linux: `source .venv/bin/activate`. Then plain `python` works |
+
+To check everything: `python -m pytest -q` runs the full test suite in about 3 minutes, and `python scripts/run_evals.py` runs the known-answer evaluation.
+
 ## Status
 
 | # | Segment | Status |
@@ -25,14 +83,12 @@ Runs fully offline with no API key (rule-based parsing and wording). With a Clau
 | 8 | **UI**: chat with live progress, clarification forms, answer card, SVG charts, evidence with SQL and re-run, role switcher, DQ banner | ✅ done |
 | 9 | **Evals, demo, write-up**: 20 known-answer cases with numeric, structural, SQL-equivalence and LLM-judge graders; report; demo runner; architecture and design docs | ✅ done |
 
-## Quick start
+## Developer commands
+
+With the virtual environment active (see [Troubleshooting](#troubleshooting)):
 
 ```bash
-python -m venv .venv
-.venv\Scripts\activate            # Windows  (source .venv/bin/activate on macOS/Linux)
-pip install -r requirements.txt
-
-python scripts/generate_data.py   # builds data/warehouse.duckdb (~1.05M attempts, ~15 s)
+python scripts/generate_data.py   # builds data/warehouse.duckdb (~1.05M attempts)
 python scripts/verify_data.py     # checks every planted anomaly, writes fixtures/ground_truth.json
 python scripts/check_semantic.py  # validates the semantic layer + policies, re-derives the ground truth through it
 python scripts/check_safety.py    # ground truth through the SQL gate + an attack catalog (34 checks)
@@ -62,9 +118,7 @@ python scripts/ask.py --user u_west "Top 5 merchants by GMV last month"
 
 # the UI and the HTTP API (segments 7-8): open http://localhost:8000 ; API docs at http://localhost:8000/docs
 uvicorn analyst.api:app --port 8000
-# to demo with a real model, put the key in .env (gitignored; the server reads it at startup):
-#   OPENROUTER_API_KEY=...        (or GEMINI_API_KEY / ANTHROPIC_API_KEY)
-#   ANALYST_LLM_PROVIDER=openrouter
+# to use a real model, copy .env.example to .env and fill in one key (see "Run it on your machine")
 ```
 
 `python scripts/generate_data.py --scale 0.2` builds a smaller warehouse for quick iteration. Output is deterministic for a given seed and config.
