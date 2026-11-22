@@ -284,3 +284,19 @@ def test_users_endpoint_feeds_the_role_switcher(env):
     assert all(set(u) == {"user_id", "name", "role"} for u in body["users"])   # no attributes leak
     info = c.get("/api/v1/info").json()
     assert info["api"] == "/api/v1" and info["docs"] == "/docs"
+
+
+# --------------------------------------------------------------------------- segment 9: eval harness over the API
+
+def test_admin_runs_selected_eval_cases_and_the_run_is_stored(env):
+    c = env["client"]
+    assert c.post("/api/v1/evals/run", headers=H("u_west"), json={"cases": ["EV05"]}).status_code == 403
+    assert c.post("/api/v1/evals/run", headers=H("u_exec"), json={"cases": ["NOPE"]}).status_code == 404
+    r = c.post("/api/v1/evals/run", headers=H("u_exec"), json={"cases": ["EV05", "EV06", "EV03"]})
+    assert r.status_code == 200, r.text
+    rep = r.json()
+    assert [x["case_id"] for x in rep["results"]] == ["EV03_access_denied", "EV05_unsafe", "EV06_injection"]
+    assert rep["summary"]["passed"] == 3 and rep["summary"]["gate"]["passed"]
+    assert "# Evaluation report" in rep["markdown"]
+    row = env["store"].con.execute("SELECT model FROM eval_runs WHERE id = ?", (rep["run_id"],)).fetchone()
+    assert row and row[0] == "offline"

@@ -34,3 +34,12 @@ def test_safety_gate_end_to_end():
 def test_question_pipeline_end_to_end():
     from scripts.check_pipeline import main
     assert main("offline") == 0
+
+
+@pytest.mark.skipif(not _fresh(), reason="run scripts/generate_data.py and scripts/verify_data.py first")
+def test_eval_suite_meets_the_gate():
+    from analyst.evals import load_cases, run_suite
+    from analyst.pipeline import Analyst
+    rep = run_suite(Analyst(provider="offline"), load_cases())
+    failed = [(r["case_id"], r["graders"]) for r in rep["results"] if not r["passed"]]
+    assert rep["summary"]["gate"]["passed"] and not failed, failed

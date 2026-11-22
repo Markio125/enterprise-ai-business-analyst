@@ -56,6 +56,9 @@ llm:
   refusal_fallback: default             # server-side fallback on safety refusals (Opus only); null to disable
   max_json_retries: 2                   # malformed / semantically invalid LLM output -> retry with the error
   max_sql_repair_attempts: 2            # validator / executor error -> regenerate
+  pricing:                              # USD per million tokens, used for the eval cost report
+    claude-opus-5-5:  {input: 4.00, output: 20.00, cache_read: 0.20}
+    claude-haiku-5-5: {input: 0.10, output: 0.50}   # prompts <= 100K tokens
 
 defaults:
   default_time_window_days: 30          # used when a question names no period (always disclosed)

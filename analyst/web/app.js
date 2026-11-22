@@ -95,6 +95,7 @@
     sel.value = u.users.some((x) => x.user_id === saved) ? saved : u.users[0].user_id;
     sel.addEventListener("change", () => switchUser(sel.value));
     $("#newsession").addEventListener("click", () => switchUser(state.user, true));
+    $("#runevals").addEventListener("click", runEvals);
     await switchUser(sel.value);
   }
 
@@ -106,6 +107,7 @@
     state.session = sess.session_id;
     $("#role").textContent = me.role + (me.admin ? " · admin" : "");
     $("#role").title = me.description;
+    $("#admin").hidden = !me.admin;
     renderCatalog(cat);
     renderExamples(me.role);
     $("#thread").replaceChildren(emptyState(me));
@@ -504,6 +506,42 @@
     return h("div", { class: "tbl-wrap" }, h("table", {},
       h("thead", {}, h("tr", {}, cols.map((c, j) => h("th", { class: numeric[j] ? "num" : "" }, c)))),
       h("tbody", {}, rows.slice(0, max).map((r) => h("tr", {}, r.map((v, j) => h("td", { class: numeric[j] ? "num" : "" }, cell(v, cols[j]))))))));
+  }
+
+  // ------------------------------------------------------------------ eval suite (admin)
+  async function runEvals() {
+    if (state.busy) return;
+    $("#empty")?.remove();
+    const node = $("#tpl-turn").content.firstElementChild.cloneNode(true);
+    $(".you", node).textContent = "Run the evaluation suite";
+    const body = $(".body", node);
+    body.append(h("p", { class: "muted" }, "Running every case through the pipeline and grading it…"));
+    $("#thread").append(node);
+    node.scrollIntoView({ block: "end" });
+    setBusy(true);
+    $("#runevals").disabled = true;
+    try {
+      const rep = await api("/evals/run", { method: "POST", body: "{}" });
+      const s = rep.summary, core = s.core_ev01_ev15;
+      const pct = (x) => (x == null ? "–" : Math.round(x * 100) + "%");
+      body.replaceChildren(
+        h("p", { class: "headline" }, `${s.passed}/${s.cases} cases passed. EV01–EV15: ${core.passed}/${core.cases} (${pct(core.pass_rate)}), gate ${s.gate.passed ? "met" : "NOT met"}.`),
+        h("div", { class: "badges" },
+          h("span", { class: `badge ${s.gate.passed ? "HIGH" : "LOW"}` }, `gate ≥ ${Math.round(s.gate.threshold * 100)}%`),
+          h("span", { class: "badge" }, `p50 ${s.latency_ms.p50} ms · p95 ${s.latency_ms.p95} ms`),
+          h("span", { class: "badge" }, `${s.tokens.in + s.tokens.out} tokens · $${s.cost_usd.toFixed(4)}`),
+          h("span", { class: "badge" }, `backend ${s.llm}`)),
+        h("h3", {}, "By grader"),
+        table(["grader", "ran", "passed", "skipped"], Object.entries(s.by_grader).map(([g, v]) => [g, v.ran, v.passed, v.skipped])),
+        h("h3", {}, "Cases"),
+        table(["case", "category", "user", "result", "state", "latency ms"],
+          rep.results.map((r) => [r.case_id, r.category, r.user, r.passed ? "✅ pass" : "❌ fail", r.state, r.latency_ms])),
+        h("p", { class: "small muted" }, `Stored as ${rep.run_id}. scripts/run_evals.py writes the full report (failures and answers) to evals/REPORT.md.`));
+    } catch (e) {
+      body.replaceChildren(h("div", { class: "notice failed" }, e.message));
+    }
+    $("#runevals").disabled = false;
+    setBusy(false);
   }
 
   // ------------------------------------------------------------------ charts (SPEC 16) as inline SVG

@@ -136,7 +136,9 @@ def resolve(expression: str, as_of: date) -> TimeRange:
                   note="'Today' means the latest complete day in the data.")
     if s == "yesterday":
         d = as_of - timedelta(days=1)
-        return tr(d, d, str(d))
+        return tr(d, d, str(d),
+                  note=f"'Yesterday' is counted back from the latest complete day ({as_of}), so it means {d}; "
+                       "later days are still arriving.")
     m = re.fullmatch(r"last (\d+|[a-z]+) (day|week|month)s?", s)
     if m and m.group(1) not in ("week", "month", "quarter", "year"):
         n, unit = _n(m.group(1)), m.group(2)

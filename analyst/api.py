@@ -46,12 +46,16 @@ class FeedbackBody(BaseModel):
     comment: str | None = Field(None, max_length=2000)
 
 
+class EvalBody(BaseModel):
+    cases: list[str] | None = None
+
+
 class SessionBody(BaseModel):
     user_id: str | None = None
 
 
 def create_app(service: AnalystService | None = None) -> FastAPI:
-    app = FastAPI(title="Enterprise AI Business Analyst", version="0.8.0",
+    app = FastAPI(title="Enterprise AI Business Analyst", version="0.9.0",
                   description="Ask questions about payments data in plain English. See docs/SPEC.md section 20.")
     app.add_middleware(CORSMiddleware, allow_origins=["http://localhost:5173", "http://127.0.0.1:5173",
                                                       "http://localhost:8000"],
@@ -175,8 +179,8 @@ def create_app(service: AnalystService | None = None) -> FastAPI:
         return J(svc().audit(uid))
 
     @app.post(f"{API}/evals/run")
-    def run_evals(uid: str = Depends(user)):
-        return J(svc().run_evals(uid))
+    def run_evals(body: EvalBody | None = None, uid: str = Depends(user)):
+        return J(svc().run_evals(uid, body.cases if body else None))
 
     @app.get(f"{API}/admin/config")
     def get_config(uid: str = Depends(user)):

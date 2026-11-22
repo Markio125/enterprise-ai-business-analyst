@@ -2,7 +2,14 @@
 
 An AI analyst for payments data. You ask a business question in plain English (*"Why did our success rate drop in the last two weeks?"*). It works out which data and metrics to use, generates and **validates** SQL, runs it read-only, splits the change into segments, and answers with **query evidence, charts, caveats, and a clear separation of facts, hypotheses and recommendations**.
 
-The full design is in [`docs/SPEC.md`](docs/SPEC.md).
+**Start here:**
+- [**Design write-up**](docs/WRITEUP.md): what was built, the key decisions, how each failure scenario is handled, results and limitations.
+- [**Architecture**](docs/ARCHITECTURE.md): component, lifecycle and data-access diagrams.
+- [**Eval report**](evals/REPORT.md): 20/20 known-answer cases; EV01–EV15 at 100% against the 90% gate.
+- [**Demo script**](docs/DEMO.md): a 10-minute walkthrough. `python scripts/demo.py` plays it in a terminal.
+- [Full specification](docs/SPEC.md).
+
+Runs fully offline with no API key (rule-based parsing and wording). With `ANTHROPIC_API_KEY` set, Claude parses questions, writes SQL for custom requests and words answers. The safety gate, analysis and number checks are the same either way.
 
 ## Status
 
@@ -16,7 +23,7 @@ The full design is in [`docs/SPEC.md`](docs/SPEC.md).
 | 6 | **Answer composer**: facts / hypotheses / recommendations, number grounding, confidence, chart specs | ✅ done |
 | 7 | **API + metadata DB**: FastAPI, SSE progress stream, SQLite metadata/audit/cache, clarify / narrow / rerun | ✅ done |
 | 8 | **UI**: chat with live progress, clarification forms, answer card, SVG charts, evidence with SQL and re-run, role switcher, DQ banner | ✅ done |
-| 9 | Eval harness, demo, write-up | ⏳ next |
+| 9 | **Evals, demo, write-up**: 20 known-answer cases with numeric, structural, SQL-equivalence and LLM-judge graders; report; demo runner; architecture and design docs | ✅ done |
 
 ## Quick start
 
@@ -30,7 +37,9 @@ python scripts/verify_data.py     # checks every planted anomaly, writes fixture
 python scripts/check_semantic.py  # validates the semantic layer + policies, re-derives the ground truth through it
 python scripts/check_safety.py    # ground truth through the SQL gate + an attack catalog (34 checks)
 python scripts/check_pipeline.py  # the SPEC eval questions end to end (pipeline, analysis, answer), vs ground truth (53 checks)
-pytest -q                         # fast tests at reduced scale
+python scripts/run_evals.py       # the eval suite (evals/cases.yaml) -> evals/REPORT.md
+python scripts/demo.py            # the demo script, in the terminal
+pytest -q                         # all tests (fast ones on a reduced-scale warehouse, plus full-warehouse checks)
 ```
 
 Try the semantic layer as different users:
@@ -410,6 +419,35 @@ Every demo path in SPEC section 22 was walked through in the browser:
 - the finance reconciliation waterfall;
 - the trend question.
 
+## Evaluation (segment 9)
+
+[`evals/cases.yaml`](evals/cases.yaml) holds the SPEC section 18 cases EV01–EV15, plus five robustness cases (EX16–EX20: out-of-scope region, entity outside scope, unknown metric, forecast, merchant-user scope). They are adapted to the generated data: Meridian Bank on Sep 10, Acquirer Beta, and the mix shift reported by sub_method.
+
+The harness ([`analyst/evals.py`](analyst/evals.py)) runs each case through the real pipeline as the case's user. A clarification is answered as the case specifies; the run stops at the expected waiting state when that is the assertion. Each case is graded by up to four graders:
+
+| Grader | Checks |
+|---|---|
+| numeric | headline P0/P1, decomposition totals, counts, ranked rows, segment breakdown incl. the unknown bucket, reconciliation factors, outage window, failure code; all against `fixtures/ground_truth.json` |
+| structural | status, ambiguity asked, caveat codes, top driver, interpretation, required and forbidden phrases, scope disclosed, RLS predicate in every executed query, no queries for refusals, and **what actually reached the executor** (the gate's execute and EXPLAIN calls are recorded; no DROP / DELETE / ATTACH / COPY) |
+| sql_equivalence | a hand-written reference query, run directly on the warehouse, returns the same result set as the step the pipeline ran (order-insensitive) |
+| llm_judge | rubric scores (faithfulness, fact/hypothesis separation, clarity ≥ 4/5) from a model that sees the evidence rows. Skipped with the offline backend. |
+
+A case passes when every grader that ran passed. The report gives pass rate per category and per grader, p50/p95 latency, tokens and cost (from `llm.pricing` in `config/analyst.yaml`), and the 90% gate on EV01–EV15. Runs are stored in `eval_runs` / `eval_results`.
+
+```bash
+python scripts/run_evals.py                   # offline; writes evals/REPORT.md and evals/last_run.json
+python scripts/run_evals.py --case EV01 EV08  # a subset
+python scripts/run_evals.py --llm anthropic   # through Claude, with the LLM judge
+```
+
+Admins can also run the suite from the UI sidebar or with `POST /api/v1/evals/run` (`{"cases": [...]}` optional).
+
+[`tests/test_evals.py`](tests/test_evals.py) checks that the graders **fail** wrong answers: a changed expected value, the wrong status, a reference query over the raw (duplicated) table, a simulated DELETE reaching the executor, and a low judge score each flip the grade.
+
+**Current result** (offline backend, full warehouse): 20/20 cases, EV01–EV15 15/15. Every numeric and SQL-equivalence check matches the ground truth exactly. The LLM judge was not run, because there is no API key on this machine.
+
+These cases test that the system finds the planted answers end to end. They are not a measure of generalisation to new phrasings; see the [write-up](docs/WRITEUP.md#evaluation).
+
 ## Repository layout
 
 ```
@@ -437,18 +475,34 @@ analyst/
   service.py        sessions, background runs, event streams, ownership checks, admin
   api.py            FastAPI app (SPEC 20) with SSE; serves the UI at /
   web/              the UI: index.html, app.css, app.js (no build step)
+  evals.py          eval harness: case runner, graders, cost, report (SPEC 18)
 semantic/model.yaml     entities, measures, metrics, dimensions, ambiguous terms, glossary
 config/generator.yaml   every generator knob (volumes, rates, anomaly windows and magnitudes)
 config/policies.yaml    roles, row-level scopes, demo users
 config/analyst.yaml     warehouse limits, cost controls, SQL-safety lists
 scripts/            generate_data.py, verify_data.py, check_semantic.py, check_safety.py, check_pipeline.py,
-                    catalog.py, query.py, run_sql.py, ask.py
+                    catalog.py, query.py, run_sql.py, ask.py, run_evals.py, demo.py
+evals/cases.yaml    eval cases; REPORT.md and last_run.json are the latest run
 fixtures/ground_truth.json
 tests/
+docs/WRITEUP.md     design write-up
+docs/ARCHITECTURE.md diagrams (components, lifecycle, access layers, number provenance)
+docs/DEMO.md        demo script
 docs/SPEC.md        full system specification
 ```
 
-## Assumptions & limitations (so far)
+## Mocked dependencies
+
+| Real world | Here |
+|---|---|
+| Enterprise warehouse (Snowflake / BigQuery) | DuckDB file, opened read-only |
+| Identity provider / SSO | Seeded users in `config/policies.yaml`; `X-User-Id` header; user picker in the UI |
+| Data catalogue | YAML semantic layer (`semantic/model.yaml`) |
+| Finance ledger system | `finance_daily_settlement_summary`, an independent aggregate that disagrees on purpose |
+| Live data | Synthetic, seeded, deterministic |
+| LLM provider (when no key) | Offline rule-based backend for parsing, SQL and wording |
+
+## Assumptions & limitations
 
 - Synthetic data only. Rates and distributions are plausible but not calibrated to any real processor.
 - Anomalies are isolated in time so each has one clean, verifiable explanation.
@@ -459,6 +513,8 @@ docs/SPEC.md        full system specification
 - The UI is a demo client, not a hardened product. There is no real sign-in (anyone who can reach the server can pick any user), and charts are hand-drawn SVG rather than a charting library, to keep it dependency-free.
 - Mock authentication: `X-User-Id` must be replaced by real identity (SSO/JWT) before any deployment. Event streams are kept in process memory (replayed from the metadata DB after a restart), so the API runs as a single process; several processes would need a shared event bus.
 - Grounding checks that each number traces to a computed value. It does not check that the surrounding claim is right (e.g. a rewrite that attaches a correct number to the wrong segment). Keeping the facts' structure fixed and only letting the model reword limits that risk; the eval checks also assert key claims.
+- The eval cases come from the same planted anomalies the analysis was built around. They show the system finds known answers end to end, not that it generalises; a held-out question set and a Claude run with the LLM judge are the next step.
+- There is no recorded demo video. [`docs/DEMO.md`](docs/DEMO.md) and `scripts/demo.py` give a reproducible walkthrough instead.
 - The offline parser is rules, tuned on the demo and eval questions. Real phrasing variety needs the Claude backend. No live Claude run is part of this commit: no API key was available here. The request shape is unit-tested against a fake client.
 - Merchant-name entity resolution is exact, then unique substring, then a fuzzy "did you mean". Names are not unique across regions; resolution only ever sees the user's scope.
 - The generator favours clarity over realism in places. For example, merchant success-rate noise is centred so the A1 campaign merchant is exactly average, which makes A1 a near-pure mix effect.

@@ -72,3 +72,8 @@ def test_clip_to_data_window():
 def test_unknown_raises(expr):
     with pytest.raises(TimeParseError):
         resolve(expr, AS_OF)
+
+
+def test_yesterday_discloses_it_counts_from_the_latest_complete_day():
+    tr = resolve("yesterday", AS_OF)
+    assert tr.start == tr.end == date(2026, 10, 26) and "latest complete day (2026-10-27)" in tr.note

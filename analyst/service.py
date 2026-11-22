@@ -67,6 +67,7 @@ class AnalystService:
                                        thread_name_prefix="analyst")
         self._sessions: dict[str, Session] = {}
         self._session_locks: dict[str, threading.Lock] = {}
+        self._eval_lock = threading.Lock()
         self._events: dict[str, list[dict]] = {}
         self._runs: dict[str, int] = {}
         self._cond = threading.Condition()
@@ -268,17 +269,17 @@ class AnalystService:
         return self.store.audit(None if self.is_admin(user_id) else user_id)
 
     # ------------------------------------------------------------------ admin
-    def run_evals(self, user_id: str) -> dict:
+    def run_evals(self, user_id: str, cases: list[str] | None = None) -> dict:
+        """Run evals/cases.yaml (or the given case ids) through this service's analyst; stored in eval_runs."""
         if not self.is_admin(user_id):
             raise Forbidden("admin only")
-        from scripts.check_pipeline import collect
-        t0 = time.perf_counter()
-        results = collect(self.analyst)
-        rows = [{"case_id": n, "passed": ok, "scores": None if ok else {"observed": str(obs)[:500]}} for n, ok, obs in results]
-        summary = {"cases": len(rows), "passed": sum(r["passed"] for r in rows),
-                   "seconds": round(time.perf_counter() - t0, 1), "llm": self.analyst.llm.name}
-        rid = self.store.record_eval(self.analyst.llm.name, {"provider": self.analyst.llm.name}, summary, rows)
-        return {"run_id": rid, "summary": summary, "failed": [r for r in rows if not r["passed"]]}
+        from .evals import load_cases, run_suite, to_markdown
+        selected = load_cases(ids=cases)
+        if not selected:
+            raise NotFound("no eval case matches")
+        with self._eval_lock:                 # one suite at a time
+            report = run_suite(self.analyst, selected, store=self.store)
+        return report | {"markdown": to_markdown(report)}
 
     EDITABLE = {("ambiguity", "mode"), ("ambiguity", "material_threshold_pct"), ("answer", "max_recommendations"),
                 ("defaults", "default_time_window_days"), ("api", "cache_ttl_seconds")}
