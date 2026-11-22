@@ -5,8 +5,7 @@ step is a QuerySpec that the semantic compiler turns into exact metric SQL. The
 LLM only writes SQL for steps the metric layer cannot express (`custom_request`
 -> a SQL step), and that SQL still goes through the same safety gate.
 
-COMPUTE and DQ_CHECK steps are declared here and executed by the analysis engine
-(segment 5).
+COMPUTE and DQ_CHECK steps are declared here and executed by the analysis engine.
 
 The planner also guards result size: a plan whose breakdown would return more
 rows than `max_result_rows` (e.g. hourly x every merchant x a year) is not run;

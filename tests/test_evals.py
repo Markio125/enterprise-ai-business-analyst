@@ -1,4 +1,4 @@
-"""Segment 9: the evaluation harness. The graders must pass correct answers AND fail wrong ones.
+"""The evaluation harness. The graders must pass correct answers AND fail wrong ones.
 
 Runs on the small warehouse, so expected values are computed from that warehouse here, not taken from
 fixtures/ground_truth.json (which describes the full-size one; see test_ground_truth_semantic.py for

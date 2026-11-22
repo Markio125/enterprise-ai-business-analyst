@@ -7,3 +7,7 @@ data/*
 *.duckdb
 *.duckdb.wal
 .env
+
+# generated eval output (run scripts/run_evals.py); the REPORT.md files are kept
+evals/**/last_run.json
+evals/**/*-last_run.json

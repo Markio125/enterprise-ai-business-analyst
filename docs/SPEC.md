@@ -1,4 +1,4 @@
-> **Implementation note:** where the build differs from this spec (fictional bank names, anomaly dates, SCD join), see "Changes from the spec" in the README. `fixtures/ground_truth.json` is authoritative for numbers.
+> **Implementation note:** where the build differs from this spec (fictional bank names, anomaly dates, SCD join), see "Differences from the spec" in [DETAILS.md](DETAILS.md#differences-from-the-spec). `fixtures/ground_truth.json` is authoritative for numbers.
 
 # Case 2 — Enterprise AI Business Analyst: System Schema & Specification
 

@@ -1,7 +1,7 @@
 """Role-filtered catalog: what a given user may ask about.
 
-The same structure backs the future GET /catalog endpoint (segment 7) and the
-grounding block in the LLM prompt (segment 4): the model only ever sees metrics,
+The same structure backs the GET /api/v1/catalog endpoint and the
+grounding block in the LLM prompt: the model only ever sees metrics,
 dimensions and values the user is allowed to use.
 """
 from __future__ import annotations

@@ -1,4 +1,4 @@
-"""Segment 4: question pipeline (parse -> ambiguity -> plan -> SQL -> repair), on the small warehouse.
+"""Question pipeline (parse -> ambiguity -> plan -> SQL -> repair), on the small warehouse.
 
 The offline backend makes these deterministic; ScriptedLLM plays a misbehaving
 model to exercise retries, the SQL repair loop and the safety gate.

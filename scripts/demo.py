@@ -144,6 +144,10 @@ def main(argv=None) -> int:
             for c, v in s["by_category"].items():
                 print(f"    {c:<14} {v['passed']}/{v['cases']}")
             print("  Full report: evals/REPORT.md (re-run with: python scripts/run_evals.py)")
+        elif (ROOT / "evals" / "REPORT.md").exists():     # committed report, from the last published run
+            for line in (ROOT / "evals" / "REPORT.md").read_text(encoding="utf-8").splitlines()[2:6]:
+                print("  " + line.lstrip("- ").replace("**", ""))
+            print("  Full report: evals/REPORT.md (re-run with: python scripts/run_evals.py)")
         else:
             print("  Run python scripts/run_evals.py first.")
     return 0

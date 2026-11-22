@@ -1,4 +1,4 @@
-"""Segment 7: HTTP API, SSE stream, metadata DB, cache, audit and ownership, on the small warehouse."""
+"""HTTP API, SSE stream, metadata DB, cache, audit and ownership, on the small warehouse."""
 from __future__ import annotations
 
 import json
@@ -255,7 +255,7 @@ def test_input_validation(env):
                   json={"text": "x" * 2001}).status_code == 422
 
 
-# --------------------------------------------------------------------------- segment 8: UI serving
+# --------------------------------------------------------------------------- UI serving
 
 def test_ui_is_served_without_a_build_step(env):
     c = env["client"]
@@ -286,7 +286,7 @@ def test_users_endpoint_feeds_the_role_switcher(env):
     assert info["api"] == "/api/v1" and info["docs"] == "/docs"
 
 
-# --------------------------------------------------------------------------- segment 9: eval harness over the API
+# --------------------------------------------------------------------------- eval harness over the API
 
 def test_admin_runs_selected_eval_cases_and_the_run_is_stored(env):
     c = env["client"]

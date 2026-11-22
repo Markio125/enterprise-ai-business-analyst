@@ -93,7 +93,7 @@ def create_app(service: AnalystService | None = None) -> FastAPI:
     def J(obj, code=200):
         return JSONResponse(json.loads(dumps(obj)), code)
 
-    # the single-page UI (segment 8): no build step, served from analyst/web
+    # the single-page UI: no build step, served from analyst/web
     app.mount("/ui", StaticFiles(directory=WEB), name="ui")
 
     @app.get("/", include_in_schema=False)

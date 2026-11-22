@@ -10,7 +10,7 @@ RECEIVED -> PARSING -> (REJECTED_UNSAFE | ANSWERED_DIRECT)
 
 Every result carries an `answer` (SPEC 15.1); waiting and refusal states get a minimal one.
 Every stage appends to `trace` (stage, status, latency, tokens) for the
-"show steps" panel and the run_steps table (segment 7).
+"show steps" panel and the run_steps table.
 """
 from __future__ import annotations
 

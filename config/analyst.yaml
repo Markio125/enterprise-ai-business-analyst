@@ -9,7 +9,7 @@ warehouse:
   memory_limit: 1GB
   threads: 4
   max_result_rows: 5000        # hard cap on rows returned to the app
-  max_rows_to_llm: 200         # rows the LLM may see per result (used in segment 4)
+  max_rows_to_llm: 200         # rows the LLM may see per result
   default_limit: 1000          # injected into non-aggregated queries without a LIMIT
 
 cost_controls:
@@ -42,7 +42,7 @@ sql_safety:
   # Advisory: these tables have a cleaner curated view.
   prefer_views: {fact_payment_attempts_raw: v_attempts}
 
-# --------------------------------------------------------------------------- segment 4: LLM pipeline
+# --------------------------------------------------------------------------- LLM pipeline
 llm:
   # anthropic: Claude via the official SDK (needs ANTHROPIC_API_KEY or an `ant auth login` profile).
   # offline:   deterministic rule-based backend; no network, used by tests and when no key is set.
@@ -92,12 +92,12 @@ ambiguity:
   material_threshold_pct: 5
   max_clarification_turns: 2
 
-# --------------------------------------------------------------------------- segment 6: answers
+# --------------------------------------------------------------------------- answers
 answer:
   max_recommendations: 3
   max_grounding_retries: 2     # LLM rewrites with an untraceable number are re-requested, then the draft is used
 
-# --------------------------------------------------------------------------- segment 7: API
+# --------------------------------------------------------------------------- API
 api:
   metadata_db: data/app.sqlite     # sessions, questions, run_steps, queries, answers, audit, cache (SPEC 19)
   cache_ttl_seconds: 900           # query-result cache; the key includes the data version, so new data never hits

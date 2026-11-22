@@ -1,7 +1,7 @@
 """Role-based access control on top of the semantic layer.
 
 This is enforcement layer 1 (semantic pre-check) plus the row-level scope that the
-compiler injects. The SQL validator (segment 3) re-checks generated SQL against the
+compiler injects. The SQL validator re-checks generated SQL against the
 same rules, so a request that slips past here is still caught.
 """
 from __future__ import annotations

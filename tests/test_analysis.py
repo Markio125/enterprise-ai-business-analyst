@@ -1,4 +1,4 @@
-"""Segment 5: analysis engine, data-quality checks, reconciliation, and two gate fixes found while building it."""
+"""Analysis engine, data-quality checks, reconciliation, and two SQL-gate regressions."""
 from __future__ import annotations
 
 import random

@@ -1,4 +1,4 @@
-"""Segment 6: answer composition, number grounding, confidence, charts."""
+"""Answer composition, number grounding, confidence, charts."""
 from __future__ import annotations
 
 import shutil

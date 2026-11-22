@@ -15,7 +15,7 @@ Methods:
   TREND                    daily series + robust z-score anomalies
   RECONCILIATION           two sources, attribution waterfall, residual
 Hypotheses and recommendations are templated from these patterns (12.5 / 12.6);
-the answer composer (segment 6) phrases them.
+the answer composer phrases them.
 """
 from __future__ import annotations
 

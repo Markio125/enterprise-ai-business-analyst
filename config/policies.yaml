@@ -3,7 +3,7 @@
 # Enforcement is layered (see docs/SPEC.md section 11.2):
 #   1. Semantic pre-check: a request for a metric / dimension / table the role can't use is refused
 #      before any SQL is generated (analyst/policies.py).
-#   2. SQL validator: rejects restricted tables / columns in generated SQL (segment 3).
+#   2. SQL validator: rejects restricted tables / columns in generated SQL.
 #   3. Row-level scope: predicates are injected by the system. The LLM is told its scope
 #      but never trusted to apply it.
 #
