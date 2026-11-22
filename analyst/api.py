@@ -13,16 +13,19 @@ from __future__ import annotations
 import asyncio
 import json
 from datetime import date
+from pathlib import Path
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from .service import AnalystService, Conflict, Forbidden, NotFound
 from .store import dumps
 
 API = "/api/v1"
+WEB = Path(__file__).parent / "web"
 
 
 class AskBody(BaseModel):
@@ -48,7 +51,7 @@ class SessionBody(BaseModel):
 
 
 def create_app(service: AnalystService | None = None) -> FastAPI:
-    app = FastAPI(title="Enterprise AI Business Analyst", version="0.7.0",
+    app = FastAPI(title="Enterprise AI Business Analyst", version="0.8.0",
                   description="Ask questions about payments data in plain English. See docs/SPEC.md section 20.")
     app.add_middleware(CORSMiddleware, allow_origins=["http://localhost:5173", "http://127.0.0.1:5173",
                                                       "http://localhost:8000"],
@@ -84,12 +87,28 @@ def create_app(service: AnalystService | None = None) -> FastAPI:
     def J(obj, code=200):
         return JSONResponse(json.loads(dumps(obj)), code)
 
-    @app.get("/")
+    # the single-page UI (segment 8): no build step, served from analyst/web
+    app.mount("/ui", StaticFiles(directory=WEB), name="ui")
+
+    @app.get("/", include_in_schema=False)
     def root():
+        return FileResponse(WEB / "index.html", headers={"Cache-Control": "no-cache"})
+
+    @app.get(f"{API}/info")
+    def info():
         s = svc()
         return {"service": "enterprise-ai-business-analyst", "api": API, "docs": "/docs",
                 "llm": s.analyst.llm.name, "data_as_of": s.analyst.as_of.isoformat(),
                 "users": sorted(s.policy.users)}
+
+    @app.get(f"{API}/users")
+    def users():
+        """Who can be selected in the UI's mock sign-in (SPEC 1.2: seeded users, role switcher)."""
+        s = svc()
+        return {"users": [{"user_id": uid, "name": s.policy.users[uid].name,
+                           "role": s.policy.role_of(s.policy.users[uid]).name}
+                          for uid in s.policy.users],
+                "as_of": s.analyst.as_of.isoformat(), "llm": s.analyst.llm.name}
 
     @app.get(f"{API}/health")
     def health():

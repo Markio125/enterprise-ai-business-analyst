@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Business Analyst</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><rect width='16' height='16' rx='3' fill='%23245bdb'/><path d='M3 12V8M6.5 12V5M10 12V7M13 12V3' stroke='white' stroke-width='1.8' stroke-linecap='round'/></svg>">
+  <link rel="stylesheet" href="/ui/app.css">
+</head>
+<body>
+<header class="top">
+  <div class="brand">
+    <svg viewBox="0 0 16 16" width="22" height="22" aria-hidden="true"><rect width="16" height="16" rx="3" fill="var(--accent)"/><path d="M3 12V8M6.5 12V5M10 12V7M13 12V3" stroke="#fff" stroke-width="1.8" stroke-linecap="round"/></svg>
+    <span>Business Analyst</span>
+    <span class="muted small" id="asof"></span>
+  </div>
+  <div class="who">
+    <label for="user" class="small muted">Signed in as</label>
+    <select id="user" aria-label="Switch user (mock sign-in)"></select>
+    <span class="role-pill" id="role"></span>
+  </div>
+</header>
+
+<div id="dq" class="dq" hidden></div>
+
+<main class="layout">
+  <aside class="side">
+    <section>
+      <h2>Try asking</h2>
+      <ul id="examples" class="examples"></ul>
+    </section>
+    <section>
+      <h2>What you can use</h2>
+      <p class="small muted" id="scope"></p>
+      <details>
+        <summary>Metrics (<span id="nmetrics">0</span>)</summary>
+        <ul id="metrics" class="catalog"></ul>
+      </details>
+      <details>
+        <summary>Breakdowns (<span id="ndims">0</span>)</summary>
+        <ul id="dims" class="catalog"></ul>
+      </details>
+      <p class="small muted" id="denied"></p>
+    </section>
+    <section class="small muted">
+      <button class="link" id="newsession" type="button">Start a new conversation</button>
+      <div id="llm"></div>
+    </section>
+  </aside>
+
+  <section class="chat">
+    <div id="thread" class="thread" aria-live="polite">
+      <div class="empty" id="empty">
+        <h1>Ask a question about payments data</h1>
+        <p class="muted">Answers come with the numbers behind them: every figure is traced to a query you can inspect, and access rules for your role are applied to every query.</p>
+      </div>
+    </div>
+    <form id="ask" class="composer">
+      <textarea id="q" rows="1" placeholder="e.g. Why did our payment success rate drop in the last two weeks?" maxlength="2000" required></textarea>
+      <button type="submit" id="send">Ask</button>
+    </form>
+  </section>
+</main>
+
+<template id="tpl-turn">
+  <article class="turn">
+    <div class="you"></div>
+    <div class="bot">
+      <ol class="progress"></ol>
+      <div class="body"></div>
+    </div>
+  </article>
+</template>
+
+<script src="/ui/app.js"></script>
+</body>
+</html>

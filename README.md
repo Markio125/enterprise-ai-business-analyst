@@ -15,8 +15,8 @@ The full design is in [`docs/SPEC.md`](docs/SPEC.md).
 | 5 | **Analysis engine**: mix/rate decomposition, driver ranking, drill-down, data-quality checks, reconciliation, hypotheses | ✅ done |
 | 6 | **Answer composer**: facts / hypotheses / recommendations, number grounding, confidence, chart specs | ✅ done |
 | 7 | **API + metadata DB**: FastAPI, SSE progress stream, SQLite metadata/audit/cache, clarify / narrow / rerun | ✅ done |
-| 8 | UI | ⏳ next |
-| 9 | Eval harness, demo, write-up | ⬜ |
+| 8 | **UI**: chat with live progress, clarification forms, answer card, SVG charts, evidence with SQL and re-run, role switcher, DQ banner | ✅ done |
+| 9 | Eval harness, demo, write-up | ⏳ next |
 
 ## Quick start
 
@@ -51,7 +51,7 @@ python scripts/ask.py -i --user u_exec
 python scripts/ask.py --user u_exec --answer METRIC_DEFINITION:success_rate=a "Why did our payment success rate drop in the last two weeks?"
 python scripts/ask.py --user u_west "Top 5 merchants by GMV last month"
 
-# the HTTP API (segment 7); interactive docs at http://localhost:8000/docs
+# the UI and the HTTP API (segments 7-8): open http://localhost:8000 ; API docs at http://localhost:8000/docs
 uvicorn analyst.api:app --port 8000
 ```
 
@@ -345,7 +345,7 @@ The eval checks now cover each case's answer-level expectations:
 | GET | `/api/v1/questions/{qid}` and `/steps` | Full result (answer, analysis, plan) with every executed query, and the stage trace |
 | POST | `/api/v1/queries/{id}/rerun` | Re-execute a stored query **through the full gate again** as the current user, bypassing the cache |
 | POST | `/api/v1/questions/{qid}/feedback` | Rating |
-| GET | `/api/v1/catalog`, `/dq/summary?from=&to=`, `/audit`, `/me`, `/health` | Role-filtered catalog, data-quality dashboard, access audit (yours; everyone's for admins) |
+| GET | `/api/v1/catalog`, `/dq/summary?from=&to=`, `/audit`, `/me`, `/users`, `/info`, `/health` | Role-filtered catalog, data-quality dashboard, access audit (yours; everyone's for admins) |
 | POST/GET/PUT | `/api/v1/evals/run`, `/admin/config` | Admin only. Runs the eval checks (stored in `eval_runs`), edits whitelisted runtime settings. |
 
 Authentication is mocked, as the spec allows: the caller identifies with `X-User-Id`.
@@ -378,6 +378,38 @@ curl -s -X POST localhost:8000/api/v1/questions/$QID/clarify -H "X-User-Id: u_ex
 curl -s localhost:8000/api/v1/questions/$QID -H "X-User-Id: u_exec" | jq .result.answer.headline
 ```
 
+## UI (segment 8)
+
+`uvicorn analyst.api:app --port 8000`, then open http://localhost:8000. The page lives in [`analyst/web/`](analyst/web/): one HTML file, one stylesheet and one script, with no build step, no npm and no CDN, so it works offline. It uses only the public API above.
+
+The SPEC section 20 panels:
+- **Role switcher.** Pick any seeded user (mock sign-in; the choice is sent as `X-User-Id`). Each switch starts a new conversation. The sidebar shows example questions for that role, the metrics and breakdowns the role may use, its row scope, and what it cannot see.
+- **DQ banner.** Data-quality issues for the current window (from `/dq/summary`), expandable.
+- **Chat with live progress.** Stages appear as chips while the run streams over SSE. The stream is read with `fetch()`, because `EventSource` cannot send the user header; it resumes with `?after=`.
+- **Clarification and narrowing.** Each definition is shown with its value for your period and the default preselected. Answering continues the same question.
+- **Answer card.**
+  - Headline, then badges: confidence, how many numbers were checked against query results, query count (and whether results came from the cache), and row scope.
+  - Facts, hypotheses and recommendations, colour-coded. Each fact's evidence ids jump to the query behind it.
+  - Caveats, confidence reasons, and the definitions used (metric, period, scope, data version).
+- **Charts.** The composer's chart specs (SPEC 16), drawn as inline SVG: KPI, daily line with period bands and marked days, mix/rate waterfall, grouped bars (with the outage-hour band), horizontal bars, ranking table.
+- **Evidence.** For every query:
+  - the final SQL, with a copy button;
+  - the SQL before the access rules were applied;
+  - the access rules applied (for example `region = 'WEST'`);
+  - the result rows, data version and cache status;
+  - **Re-run**, which executes the query again through the full safety gate as the current user.
+- **Steps timeline.** Every stage with its status, detail and latency, and token counts.
+- Follow-up suggestions as one-click chips, and thumbs-up/down feedback.
+
+Every demo path in SPEC section 22 was walked through in the browser:
+- the driver question with its clarification (mix shift towards UPI_COLLECT, QuickBazaar);
+- the card outage on Sep 10 (Meridian Bank, 18:00-23:00, with the hour chart);
+- the ops analyst refused MDR revenue;
+- the delete request rejected;
+- the West manager's ranking with the injected region rule shown in evidence;
+- the finance reconciliation waterfall;
+- the trend question.
+
 ## Repository layout
 
 ```
@@ -403,7 +435,8 @@ analyst/
   composer.py       answer draft, LLM wording, number grounding, confidence, chart specs
   store.py          SQLite metadata DB (SPEC 19) + query-result cache
   service.py        sessions, background runs, event streams, ownership checks, admin
-  api.py            FastAPI app (SPEC 20) with SSE
+  api.py            FastAPI app (SPEC 20) with SSE; serves the UI at /
+  web/              the UI: index.html, app.css, app.js (no build step)
 semantic/model.yaml     entities, measures, metrics, dimensions, ambiguous terms, glossary
 config/generator.yaml   every generator knob (volumes, rates, anomaly windows and magnitudes)
 config/policies.yaml    roles, row-level scopes, demo users
@@ -423,6 +456,7 @@ docs/SPEC.md        full system specification
 - The time-filter rule (S07) is best-effort: any predicate on a fact's time column counts. The EXPLAIN cost guard (S12) is the backstop.
 - Data-quality checks are fixed system queries over the whole warehouse (not scoped by role). They report only rates and dates, never values or row counts.
 - Hypotheses are templates over measured patterns. They are not causal proof; answers label them as hypotheses, with confidence and a validation step.
+- The UI is a demo client, not a hardened product. There is no real sign-in (anyone who can reach the server can pick any user), and charts are hand-drawn SVG rather than a charting library, to keep it dependency-free.
 - Mock authentication: `X-User-Id` must be replaced by real identity (SSO/JWT) before any deployment. Event streams are kept in process memory (replayed from the metadata DB after a restart), so the API runs as a single process; several processes would need a shared event bus.
 - Grounding checks that each number traces to a computed value. It does not check that the surrounding claim is right (e.g. a rewrite that attaches a correct number to the wrong segment). Keeping the facts' structure fixed and only letting the model reword limits that risk; the eval checks also assert key claims.
 - The offline parser is rules, tuned on the demo and eval questions. Real phrasing variety needs the Claude backend. No live Claude run is part of this commit: no API key was available here. The request shape is unit-tested against a fake client.

@@ -253,3 +253,34 @@ def test_input_validation(env):
     assert c.post(f"/api/v1/sessions/{sid}/questions", headers=H("u_exec"), json={"text": ""}).status_code == 422
     assert c.post(f"/api/v1/sessions/{sid}/questions", headers=H("u_exec"),
                   json={"text": "x" * 2001}).status_code == 422
+
+
+# --------------------------------------------------------------------------- segment 8: UI serving
+
+def test_ui_is_served_without_a_build_step(env):
+    c = env["client"]
+    r = c.get("/")
+    assert r.status_code == 200 and r.headers["content-type"].startswith("text/html")
+    assert "/ui/app.js" in r.text and "/ui/app.css" in r.text
+    for path, kind in (("/ui/app.js", "javascript"), ("/ui/app.css", "text/css")):
+        r = c.get(path)
+        assert r.status_code == 200 and kind in r.headers["content-type"], path
+    js = c.get("/ui/app.js").text
+    # the UI only talks to the documented API and always identifies the caller
+    assert '"X-User-Id": state.user' in js
+    for route in ("/sessions/", "/questions/", "/stream?after=", "/clarify", "/narrow", "/rerun", "/feedback",
+                  "/catalog", "/dq/summary", "/users", "/me"):
+        assert route in js, route
+
+
+def test_users_endpoint_feeds_the_role_switcher(env):
+    c = env["client"]
+    r = c.get("/api/v1/users")                 # public: it only lists who can be selected
+    assert r.status_code == 200
+    body = r.json()
+    roles = {u["user_id"]: u["role"] for u in body["users"]}
+    assert roles["u_exec"] == "exec" and roles["u_west"] == "regional_manager_west"
+    assert body["as_of"] and body["llm"] == "offline"
+    assert all(set(u) == {"user_id", "name", "role"} for u in body["users"])   # no attributes leak
+    info = c.get("/api/v1/info").json()
+    assert info["api"] == "/api/v1" and info["docs"] == "/docs"
