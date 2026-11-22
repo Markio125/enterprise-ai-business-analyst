@@ -76,3 +76,9 @@ ambiguity:
 answer:
   max_recommendations: 3
   max_grounding_retries: 2     # LLM rewrites with an untraceable number are re-requested, then the draft is used
+
+# --------------------------------------------------------------------------- segment 7: API
+api:
+  metadata_db: data/app.sqlite     # sessions, questions, run_steps, queries, answers, audit, cache (SPEC 19)
+  cache_ttl_seconds: 900           # query-result cache; the key includes the data version, so new data never hits
+  workers: 4                       # concurrent pipeline runs (one at a time per session)

@@ -78,6 +78,7 @@ class ValidationResult:
     estimated_rows_scanned: int | None = None
     narrowing_options: list[str] = field(default_factory=list)
     seal: str | None = None
+    bound_sql: str | None = None       # the submitted SQL with parameters inlined, before any rewrite
 
     @property
     def ok(self) -> bool:
@@ -183,6 +184,7 @@ class SqlValidator:
 
         try:
             sql_bound = bind_params(sql, params) if params else sql
+            res.bound_sql = sql_bound
         except (ValueError, ParseError) as e:
             fail("PARAMETERS", FAIL_REPAIRABLE, f"parameter binding failed: {e}")
             return self._finish(res)

@@ -71,7 +71,7 @@ roles:
 
 # Demo principals (no real authentication in this prototype).
 users:
-  u_exec:     {name: Meera Rao,       role: exec}
+  u_exec:     {name: Meera Rao,       role: exec, admin: true}      # admin: may run evals and edit runtime config
   u_ops:      {name: Kabir Shah,      role: ops_analyst}
   u_west:     {name: Neha Joshi,      role: regional_manager_west}
   u_am:       {name: Divya Nair,      role: account_manager}

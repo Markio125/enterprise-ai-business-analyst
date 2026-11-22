@@ -36,6 +36,8 @@ class ExecutionResult:
     data_version: str | None = None
     error: str | None = None
     validation: ValidationResult | None = None
+    cache_hit: bool = False
+    cached_at: str | None = None
 
     @property
     def ok(self) -> bool:
@@ -48,7 +50,8 @@ class ExecutionResult:
     def as_dict(self) -> dict:
         return {"status": self.status, "row_count": self.row_count, "truncated": self.truncated,
                 "duration_ms": self.duration_ms, "columns": self.columns, "rows": self.rows,
-                "data_version": self.data_version, "error": self.error}
+                "data_version": self.data_version, "error": self.error, "cache_hit": self.cache_hit,
+                "cached_at": self.cached_at}
 
 
 class ReadOnlyExecutor:
@@ -157,22 +160,38 @@ class QueryGateway:
     """The single entry point for user-derived queries: validate -> (seal) -> execute."""
 
     def __init__(self, settings: dict | None = None, model: SemanticModel | None = None,
-                 policy: Policy | None = None, db_path: str | Path | None = None):
+                 policy: Policy | None = None, db_path: str | Path | None = None, cache=None):
         self.settings = settings or load_settings()
         self.model = model or SemanticModel.load()
         self.policy = policy or Policy.load()
         self.executor = ReadOnlyExecutor(db_path or self.settings["warehouse"]["path"], self.settings)
         self.validator = SqlValidator(self.model, self.policy, self.settings, self.executor.schema(),
                                       explain=self.executor.explain)
+        self.cache = cache                       # analyst.store.ResultCache or None
 
     def validate(self, sql: str, principal: Principal, params=None, metrics_used=None) -> ValidationResult:
         return self.validator.validate(sql, principal, params=params, metrics_used=metrics_used)
 
-    def run_sql(self, sql: str, principal: Principal, params=None, metrics_used=None) -> ExecutionResult:
+    def run_sql(self, sql: str, principal: Principal, params=None, metrics_used=None,
+                use_cache: bool = True) -> ExecutionResult:
         v = self.validate(sql, principal, params, metrics_used)
         if not v.ok:
             return ExecutionResult(v.status, sql, error=v.user_message(), validation=v)
-        return self.executor.execute(v)
+        key = dv = None
+        if self.cache is not None:
+            # validation always runs first: a cached result is only served to a query that passes the gate now
+            dv = self.executor.data_version(v.tables_used)
+            key = self.cache.key(v.rewritten_sql, principal.role, dv)
+            hit = self.cache.get(key) if use_cache else None
+            if hit is not None:
+                return ExecutionResult(hit["status"], v.rewritten_sql, columns=hit["columns"], rows=hit["rows"],
+                                       row_count=hit["row_count"], truncated=hit["truncated"], duration_ms=0,
+                                       data_version=hit["data_version"], validation=v, cache_hit=True,
+                                       cached_at=hit.get("cached_at"))
+        res = self.executor.execute(v)
+        if key is not None and res.ok:
+            self.cache.put(key, res.as_dict(), dv)
+        return res
 
     def run_spec(self, spec: QuerySpec, principal: Principal) -> ExecutionResult:
         """Semantic path: policy pre-check, compile WITHOUT scope, then the same validator injects scope.

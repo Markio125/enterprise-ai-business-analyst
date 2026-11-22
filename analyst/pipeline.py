@@ -59,7 +59,10 @@ class StepResult:
     period: str | None = None
     dimension: str | None = None
     role: str | None = None
-    sql: str | None = None
+    sql: str | None = None                 # final SQL that ran (after the RLS rewrite)
+    generated_sql: str | None = None       # SQL as generated / compiled, before the gate rewrote it
+    cache_hit: bool = False
+    cached_at: str | None = None
     columns: list[dict] = field(default_factory=list)
     rows: list[list] = field(default_factory=list)
     row_count: int = 0
@@ -233,7 +236,8 @@ class Analyst:
 
     # ------------------------------------------------------------------ main entry
     def ask(self, question: str, user_id: str, session: Session | None = None,
-            answers: dict[str, str] | None = None) -> PipelineResult:
+            answers: dict[str, str] | None = None, on_event=None) -> PipelineResult:
+        """`on_event(dict)` receives progress events (stage_started / stage_completed) as the run proceeds."""
         session = session or Session(user_id)
         p = self.policy.principal(user_id)
         role = self.policy.role_of(p)
@@ -241,10 +245,19 @@ class Analyst:
                              llm=self.llm.name)
         started = time.perf_counter()
 
+        def emit(ev: dict):
+            if on_event is not None:
+                try:
+                    on_event(ev)
+                except Exception:  # noqa: BLE001 - a broken listener must not break the run
+                    pass
+
         def trace(stage, status, detail=None, t0=None, usage=None):
-            res.trace.append({"stage": stage, "status": status,
-                              "ms": int((time.perf_counter() - (t0 or started)) * 1000),
-                              **({"detail": detail} if detail else {}), **({"usage": usage} if usage else {})})
+            entry = {"stage": stage, "status": status, "ms": int((time.perf_counter() - (t0 or started)) * 1000),
+                     **({"detail": detail} if detail else {}), **({"usage": usage} if usage else {})}
+            res.trace.append(entry)
+            emit({"event": "stage_completed", **entry})
+
 
         for k, v in (answers or {}).items():
             session.answer(k, v)
@@ -262,6 +275,7 @@ class Analyst:
         session.pending_question = None
 
         # PARSING
+        emit({"event": "stage_started", "stage": "PARSING"})
         try:
             intent, problems = self._parse(question, p, session, trace)
         except LLMError as e:
@@ -305,6 +319,7 @@ class Analyst:
         res.disclosures += tnotes
 
         # ACCESS_PRECHECK (default variants for the check; every variant is checked again later)
+        emit({"event": "stage_started", "stage": "ACCESS_PRECHECK"})
         t0 = time.perf_counter()
         filters = [Filter(f["dimension"], f["op"], f["values"][0] if len(f["values"]) == 1 and f["op"] in ("=", "!=")
                           else f["values"]) for f in intent.filters if f["dimension"] not in ("merchant",)]
@@ -342,6 +357,7 @@ class Analyst:
         trace("ACCESS_PRECHECK", "OK", None, t0)
 
         # AMBIGUITY_CHECK
+        emit({"event": "stage_started", "stage": "AMBIGUITY_CHECK"})
         t0 = time.perf_counter()
         max_turns = int(self.settings.get("ambiguity", {}).get("max_clarification_turns", 2))
         force = session.clarification_turns >= max_turns
@@ -372,6 +388,7 @@ class Analyst:
             return self._end(res, "REFUSED_ACCESS", res.refusal["message"], trace)
 
         # PLANNING
+        emit({"event": "stage_started", "stage": "PLANNING"})
         t0 = time.perf_counter()
         cat = self.catalog(p)
         plan = self.planner.build(intent, refs, window, baseline, filters, cat)
@@ -390,6 +407,7 @@ class Analyst:
         # SQL_GENERATION / VALIDATION / EXECUTION
         for step in plan.query_steps():
             t0 = time.perf_counter()
+            emit({"event": "stage_started", "stage": "EXECUTION", "step_ref": step.id, "summary": step.purpose})
             sr = self._run_step(step, p, cat, window, trace)
             res.steps.append(sr)
             trace("EXECUTION", sr.status, {"step": step.id, "rows": sr.row_count}, t0)
@@ -404,6 +422,7 @@ class Analyst:
         n_planned = len(res.steps)
 
         # DQ_CHECK + ANALYSIS: extra queries (drill-downs, reconciliation tests) go through the gate as the user
+        emit({"event": "stage_started", "stage": "ANALYSIS"})
         t0 = time.perf_counter()
 
         def run(spec, purpose, period=None, dimension=None):
@@ -418,6 +437,7 @@ class Analyst:
             sr = StepResult(f"x{len(res.steps) - n_planned + 1}", purpose, "ERROR", role="reconcile_test")
             v = r.validation
             sr.sql = (v.rewritten_sql if v and v.rewritten_sql else sql)
+            sr.generated_sql = sql
             sr.rls = list(v.rls_predicates_applied) if v else []
             if v is not None and not v.ok:
                 sr.error = v.user_message()
@@ -448,6 +468,7 @@ class Analyst:
         res.message = msg
 
         # COMPOSITION + GROUNDING_CHECK
+        emit({"event": "stage_started", "stage": "COMPOSITION"})
         t0 = time.perf_counter()
         try:
             res.answer = self.composer.compose(res)
@@ -497,6 +518,7 @@ class Analyst:
                 return sr
             v = r.validation
             sr.sql = v.rewritten_sql if v else r.sql
+            sr.generated_sql = v.bound_sql if v else None
             sr.disclosures = list(v.disclosures) if v else []
             sr.rls = list(v.rls_predicates_applied) if v else []
             if v is not None and not v.ok:
@@ -517,6 +539,7 @@ class Analyst:
             return sr
         sr.rls = list(out.validation.rls_predicates_applied)
         sr.sql = out.validation.rewritten_sql
+        sr.generated_sql = out.attempts[-1].sql if out.attempts else None
         self._fill(sr, out.result)
         return sr
 
@@ -525,6 +548,7 @@ class Analyst:
         sr.status = r.status
         sr.columns, sr.rows, sr.row_count = r.columns, r.rows, r.row_count
         sr.truncated, sr.duration_ms, sr.data_version, sr.error = r.truncated, r.duration_ms, r.data_version, r.error
+        sr.cache_hit, sr.cached_at = getattr(r, "cache_hit", False), getattr(r, "cached_at", None)
 
     def _merchant_count(self, p: Principal) -> int:
         r = self.gateway.run_sql("SELECT COUNT(DISTINCT merchant_id) FROM dim_merchant", p)

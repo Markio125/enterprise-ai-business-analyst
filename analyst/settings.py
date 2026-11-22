@@ -18,4 +18,7 @@ def load_settings(path: Path | str = DEFAULT_SETTINGS, **overrides) -> dict:
         s.setdefault(section, {})[key] = v
     db = Path(s["warehouse"]["path"])
     s["warehouse"]["path"] = str(db if db.is_absolute() else ROOT / db)
+    meta = s.get("api", {}).get("metadata_db")
+    if meta and meta != ":memory:" and not Path(meta).is_absolute():
+        s["api"]["metadata_db"] = str(ROOT / meta)
     return s

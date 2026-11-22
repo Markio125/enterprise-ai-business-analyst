@@ -54,16 +54,14 @@ def run_case(a: Analyst, user: str, questions: list[str], answers: dict | None =
     return r, turns, s
 
 
-def main(provider: str | None = "offline") -> int:
-    sys.stdout.reconfigure(encoding="utf-8")
+def collect(a: Analyst) -> list[tuple[str, bool, object]]:
+    """Run every check with the given analyst; returns (name, passed, observed) tuples."""
     truth = json.loads((ROOT / "fixtures" / "ground_truth.json").read_text(encoding="utf-8"))
-    a = Analyst(provider=provider)
     results = []
 
     def check(name, ok, obs=""):
         results.append((name, bool(ok), obs))
 
-    t0 = time.perf_counter()
     a1 = truth["A1_mix_shift"]
     # EV01: material definition question, then the analysis runs with the chosen variant
     r, turns, _ = run_case(a, "u_exec", ["Why did our payment success rate drop in the last two weeks?"])
@@ -281,6 +279,14 @@ def main(provider: str | None = "offline") -> int:
     r, _, _ = run_case(a, "u_exec", ["Can you predict GMV for next month?"])
     check("forecast -> ANSWERED_DIRECT (out of scope)", r.state == "ANSWERED_DIRECT", r.state)
 
+    return results
+
+
+def main(provider: str | None = "offline") -> int:
+    sys.stdout.reconfigure(encoding="utf-8")
+    t0 = time.perf_counter()
+    a = Analyst(provider=provider)
+    results = collect(a)
     width = max(len(x) for x, _, _ in results)
     for name, ok, obs in results:
         print(f"{'PASS' if ok else 'FAIL'}  {name:<{width}}  {'' if ok else obs}")

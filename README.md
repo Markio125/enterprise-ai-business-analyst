@@ -14,8 +14,8 @@ The full design is in [`docs/SPEC.md`](docs/SPEC.md).
 | 4 | **LLM pipeline**: parse → access pre-check → ambiguity check (probes) → plan → SQL generation → repair loop | ✅ done |
 | 5 | **Analysis engine**: mix/rate decomposition, driver ranking, drill-down, data-quality checks, reconciliation, hypotheses | ✅ done |
 | 6 | **Answer composer**: facts / hypotheses / recommendations, number grounding, confidence, chart specs | ✅ done |
-| 7 | API (FastAPI + SSE) + metadata DB | ⏳ next |
-| 8 | UI | ⬜ |
+| 7 | **API + metadata DB**: FastAPI, SSE progress stream, SQLite metadata/audit/cache, clarify / narrow / rerun | ✅ done |
+| 8 | UI | ⏳ next |
 | 9 | Eval harness, demo, write-up | ⬜ |
 
 ## Quick start
@@ -50,6 +50,9 @@ python scripts/run_sql.py --user u_ops "SELECT 1; DROP TABLE v_attempts"
 python scripts/ask.py -i --user u_exec
 python scripts/ask.py --user u_exec --answer METRIC_DEFINITION:success_rate=a "Why did our payment success rate drop in the last two weeks?"
 python scripts/ask.py --user u_west "Top 5 merchants by GMV last month"
+
+# the HTTP API (segment 7); interactive docs at http://localhost:8000/docs
+uvicorn analyst.api:app --port 8000
 ```
 
 `python scripts/generate_data.py --scale 0.2` builds a smaller warehouse for quick iteration. Output is deterministic for a given seed and config.
@@ -329,6 +332,52 @@ The eval checks now cover each case's answer-level expectations:
 - **scope disclosure:** EV04;
 - **on every answer:** grounding and the composition rules.
 
+## API and metadata DB (segment 7)
+
+`uvicorn analyst.api:app` serves the SPEC section 20 API ([`analyst/api.py`](analyst/api.py)). The service layer is [`analyst/service.py`](analyst/service.py), and the metadata DB is [`analyst/store.py`](analyst/store.py).
+
+| Method | Path | |
+|---|---|---|
+| POST | `/api/v1/sessions` | Start a session |
+| POST | `/api/v1/sessions/{sid}/questions` | Ask. Returns 202 with `question_id` and `stream_url`; `?wait=true` runs synchronously. |
+| GET | `/api/v1/questions/{qid}/stream` | **SSE**: `run_started`, `stage_started`, `stage_completed`, `clarification_needed`, `narrowing_needed`, `answer`, `done`. Resumes with `Last-Event-ID` or `?after=`. |
+| POST | `/api/v1/questions/{qid}/clarify` / `narrow` | Answer a clarification (`{choices: {key: option}}`) or pick a narrowing option. Continues the same question. |
+| GET | `/api/v1/questions/{qid}` and `/steps` | Full result (answer, analysis, plan) with every executed query, and the stage trace |
+| POST | `/api/v1/queries/{id}/rerun` | Re-execute a stored query **through the full gate again** as the current user, bypassing the cache |
+| POST | `/api/v1/questions/{qid}/feedback` | Rating |
+| GET | `/api/v1/catalog`, `/dq/summary?from=&to=`, `/audit`, `/me`, `/health` | Role-filtered catalog, data-quality dashboard, access audit (yours; everyone's for admins) |
+| POST/GET/PUT | `/api/v1/evals/run`, `/admin/config` | Admin only. Runs the eval checks (stored in `eval_runs`), edits whitelisted runtime settings. |
+
+Authentication is mocked, as the spec allows: the caller identifies with `X-User-Id`.
+- That header only selects who is asking. Policies and row-level security are applied again inside every run.
+- Another user's session, question or query returns **404**, so ids can't be probed.
+- `u_exec` carries `admin: true`.
+
+**Metadata DB.** SQLite at `data/app.sqlite`, with the SPEC section 19 schema. It stores:
+- sessions, with conversation context (clarifications, recent intents) so follow-ups survive a restart;
+- questions, `run_steps` (every stage, with latency and tokens) and `queries` (generated SQL, final SQL after the RLS rewrite, validation, RLS predicates, cache hit, data version, result sample);
+- clarifications and the user's choices, answers, feedback;
+- the `access_audit` table (QUERY_EXECUTED, ACCESS_DENIED, UNSAFE_REJECTED);
+- `query_cache`, `dq_results`, and eval runs.
+
+**Result cache** (SPEC 17). The key is `sha256(final SQL including RLS literals + role + data version)`.
+- Validation always runs first, so a cached result is only returned for a query that passes the gate right now.
+- A data reload changes the version, so stale results are never served.
+- A different scope produces different SQL, so one user is never served another user's result.
+- A repeated question is served entirely from cache (19 of 19 queries for the A1 driver analysis).
+
+**Concurrency.** Runs execute on a worker pool, one at a time per session (they share conversation state). A question can have several runs (ask, clarify, narrow); its stream replays all of them and ends at the last `done`.
+
+```bash
+SID=$(curl -s -X POST localhost:8000/api/v1/sessions -H "X-User-Id: u_exec" | jq -r .session_id)
+QID=$(curl -s -X POST localhost:8000/api/v1/sessions/$SID/questions -H "X-User-Id: u_exec" \
+       -H "Content-Type: application/json" -d '{"text":"Why did our payment success rate drop in the last two weeks?"}' | jq -r .question_id)
+curl -N localhost:8000/api/v1/questions/$QID/stream -H "X-User-Id: u_exec"          # ... clarification_needed
+curl -s -X POST localhost:8000/api/v1/questions/$QID/clarify -H "X-User-Id: u_exec" \
+       -H "Content-Type: application/json" -d '{"choices":{"METRIC_DEFINITION:success_rate":"a"}}'
+curl -s localhost:8000/api/v1/questions/$QID -H "X-User-Id: u_exec" | jq .result.answer.headline
+```
+
 ## Repository layout
 
 ```
@@ -352,6 +401,9 @@ analyst/
   analysis.py       decomposition, driver ranking, drill-down, trend, reconciliation, hypotheses
   dq.py             data-quality checks DQ01-DQ10 (cached per window and data version)
   composer.py       answer draft, LLM wording, number grounding, confidence, chart specs
+  store.py          SQLite metadata DB (SPEC 19) + query-result cache
+  service.py        sessions, background runs, event streams, ownership checks, admin
+  api.py            FastAPI app (SPEC 20) with SSE
 semantic/model.yaml     entities, measures, metrics, dimensions, ambiguous terms, glossary
 config/generator.yaml   every generator knob (volumes, rates, anomaly windows and magnitudes)
 config/policies.yaml    roles, row-level scopes, demo users
@@ -371,6 +423,7 @@ docs/SPEC.md        full system specification
 - The time-filter rule (S07) is best-effort: any predicate on a fact's time column counts. The EXPLAIN cost guard (S12) is the backstop.
 - Data-quality checks are fixed system queries over the whole warehouse (not scoped by role). They report only rates and dates, never values or row counts.
 - Hypotheses are templates over measured patterns. They are not causal proof; answers label them as hypotheses, with confidence and a validation step.
+- Mock authentication: `X-User-Id` must be replaced by real identity (SSO/JWT) before any deployment. Event streams are kept in process memory (replayed from the metadata DB after a restart), so the API runs as a single process; several processes would need a shared event bus.
 - Grounding checks that each number traces to a computed value. It does not check that the surrounding claim is right (e.g. a rewrite that attaches a correct number to the wrong segment). Keeping the facts' structure fixed and only letting the model reword limits that risk; the eval checks also assert key claims.
 - The offline parser is rules, tuned on the demo and eval questions. Real phrasing variety needs the Claude backend. No live Claude run is part of this commit: no API key was available here. The request shape is unit-tested against a fake client.
 - Merchant-name entity resolution is exact, then unique substring, then a fuzzy "did you mean". Names are not unique across regions; resolution only ever sees the user's scope.
