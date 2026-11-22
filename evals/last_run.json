@@ -72,9 +72,9 @@
    }
   },
   "latency_ms": {
-   "p50": 5021,
-   "p95": 23128,
-   "max": 23128
+   "p50": 1172,
+   "p95": 6026,
+   "max": 6026
   },
   "tokens": {
    "in": 0,
@@ -83,7 +83,7 @@
   "cost_usd": 0.0,
   "llm": "offline",
   "data_version": "fact_payment_attempts_raw@2026-10-28T20:30Z",
-  "seconds": 139.9
+  "seconds": 37.7
  },
  "results": [
   {
@@ -167,7 +167,19 @@
      "reason": "no judge model (offline backend)"
     }
    },
-   "latency_ms": 14852,
+   "parse": {
+    "question_type": "DRIVER_ANALYSIS",
+    "metrics": [
+     "success_rate"
+    ],
+    "dimensions": [],
+    "filters": [],
+    "time_phrase": "the last two weeks",
+    "compare": "previous_period",
+    "grain": "none",
+    "notes": []
+   },
+   "latency_ms": 5835,
    "turns": 2,
    "queries": 27,
    "tokens_in": 0,
@@ -226,7 +238,27 @@
      "reason": "no judge model (offline backend)"
     }
    },
-   "latency_ms": 16551,
+   "parse": {
+    "question_type": "DRIVER_ANALYSIS",
+    "metrics": [
+     "success_rate"
+    ],
+    "dimensions": [],
+    "filters": [
+     {
+      "dimension": "payment_method",
+      "op": "=",
+      "values": [
+       "CARD"
+      ]
+     }
+    ],
+    "time_phrase": "september 10",
+    "compare": "previous_period",
+    "grain": "none",
+    "notes": []
+   },
+   "latency_ms": 4309,
    "turns": 2,
    "queries": 27,
    "tokens_in": 0,
@@ -264,7 +296,21 @@
      ]
     }
    },
-   "latency_ms": 6191,
+   "parse": {
+    "question_type": "DISTRIBUTION",
+    "metrics": [
+     "mdr_revenue_inr"
+    ],
+    "dimensions": [
+     "merchant"
+    ],
+    "filters": [],
+    "time_phrase": "last month",
+    "compare": "none",
+    "grain": "none",
+    "notes": []
+   },
+   "latency_ms": 1355,
    "turns": 1,
    "queries": 0,
    "tokens_in": 0,
@@ -320,7 +366,21 @@
      ]
     }
    },
-   "latency_ms": 9112,
+   "parse": {
+    "question_type": "RANKING",
+    "metrics": [
+     "gmv_inr"
+    ],
+    "dimensions": [
+     "merchant"
+    ],
+    "filters": [],
+    "time_phrase": "last month",
+    "compare": "none",
+    "grain": "none",
+    "notes": []
+   },
+   "latency_ms": 2202,
    "turns": 1,
    "queries": 2,
    "tokens_in": 0,
@@ -354,7 +414,19 @@
      ]
     }
    },
-   "latency_ms": 5,
+   "parse": {
+    "question_type": "LOOKUP",
+    "metrics": [
+     "attempt_count"
+    ],
+    "dimensions": [],
+    "filters": [],
+    "time_phrase": "from october 5",
+    "compare": "none",
+    "grain": "none",
+    "notes": []
+   },
+   "latency_ms": 1,
    "turns": 1,
    "queries": 0,
    "tokens_in": 0,
@@ -384,7 +456,19 @@
      ]
     }
    },
-   "latency_ms": 19,
+   "parse": {
+    "question_type": "LOOKUP",
+    "metrics": [
+     "success_rate"
+    ],
+    "dimensions": [],
+    "filters": [],
+    "time_phrase": null,
+    "compare": "previous_period",
+    "grain": "none",
+    "notes": []
+   },
+   "latency_ms": 4,
    "turns": 1,
    "queries": 0,
    "tokens_in": 0,
@@ -440,7 +524,19 @@
      ]
     }
    },
-   "latency_ms": 2939,
+   "parse": {
+    "question_type": "LOOKUP",
+    "metrics": [
+     "attempt_count"
+    ],
+    "dimensions": [],
+    "filters": [],
+    "time_phrase": "october 5",
+    "compare": "none",
+    "grain": "none",
+    "notes": []
+   },
+   "latency_ms": 782,
    "turns": 1,
    "queries": 1,
    "tokens_in": 0,
@@ -499,7 +595,21 @@
      "reason": "no judge model (offline backend)"
     }
    },
-   "latency_ms": 10721,
+   "parse": {
+    "question_type": "RECONCILIATION",
+    "metrics": [
+     "gmv_inr",
+     "finance_gross_inr",
+     "settled_gmv_inr"
+    ],
+    "dimensions": [],
+    "filters": [],
+    "time_phrase": "october",
+    "compare": "none",
+    "grain": "none",
+    "notes": []
+   },
+   "latency_ms": 2607,
    "turns": 1,
    "queries": 8,
    "tokens_in": 0,
@@ -533,7 +643,19 @@
      ]
     }
    },
-   "latency_ms": 3240,
+   "parse": {
+    "question_type": "TREND",
+    "metrics": [
+     "success_rate"
+    ],
+    "dimensions": [],
+    "filters": [],
+    "time_phrase": "lately",
+    "compare": "none",
+    "grain": "none",
+    "notes": []
+   },
+   "latency_ms": 866,
    "turns": 1,
    "queries": 7,
    "tokens_in": 0,
@@ -567,7 +689,19 @@
      ]
     }
    },
-   "latency_ms": 6829,
+   "parse": {
+    "question_type": "LOOKUP",
+    "metrics": [
+     "success_rate"
+    ],
+    "dimensions": [],
+    "filters": [],
+    "time_phrase": null,
+    "compare": "none",
+    "grain": "none",
+    "notes": []
+   },
+   "latency_ms": 1790,
    "turns": 2,
    "queries": 9,
    "tokens_in": 0,
@@ -613,7 +747,19 @@
      "reason": "no judge model (offline backend)"
     }
    },
-   "latency_ms": 7261,
+   "parse": {
+    "question_type": "LOOKUP",
+    "metrics": [
+     "success_rate"
+    ],
+    "dimensions": [],
+    "filters": [],
+    "time_phrase": "yesterday",
+    "compare": "previous_period",
+    "grain": "none",
+    "notes": []
+   },
+   "latency_ms": 1922,
    "turns": 2,
    "queries": 10,
    "tokens_in": 0,
@@ -647,7 +793,21 @@
      ]
     }
    },
-   "latency_ms": 3851,
+   "parse": {
+    "question_type": "TREND",
+    "metrics": [
+     "success_rate"
+    ],
+    "dimensions": [
+     "merchant"
+    ],
+    "filters": [],
+    "time_phrase": "the past year",
+    "compare": "none",
+    "grain": "hour",
+    "notes": []
+   },
+   "latency_ms": 989,
    "turns": 2,
    "queries": 9,
    "tokens_in": 0,
@@ -703,7 +863,21 @@
      ]
     }
    },
-   "latency_ms": 3393,
+   "parse": {
+    "question_type": "DISTRIBUTION",
+    "metrics": [
+     "gmv_inr"
+    ],
+    "dimensions": [
+     "merchant_segment"
+    ],
+    "filters": [],
+    "time_phrase": "oct 18-20",
+    "compare": "none",
+    "grain": "none",
+    "notes": []
+   },
+   "latency_ms": 953,
    "turns": 1,
    "queries": 2,
    "tokens_in": 0,
@@ -745,7 +919,29 @@
      "reason": "no judge model (offline backend)"
     }
    },
-   "latency_ms": 17949,
+   "parse": {
+    "question_type": "DRIVER_ANALYSIS",
+    "metrics": [
+     "success_rate"
+    ],
+    "dimensions": [
+     "acquirer"
+    ],
+    "filters": [
+     {
+      "dimension": "flow",
+      "op": "=",
+      "values": [
+       "CARD_NOT_PRESENT"
+      ]
+     }
+    ],
+    "time_phrase": "late september",
+    "compare": "previous_period",
+    "grain": "none",
+    "notes": []
+   },
+   "latency_ms": 4637,
    "turns": 2,
    "queries": 29,
    "tokens_in": 0,
@@ -779,7 +975,31 @@
      ]
     }
    },
-   "latency_ms": 23128,
+   "parse": {
+    "question_type": "DRIVER_ANALYSIS",
+    "metrics": [
+     "success_rate"
+    ],
+    "dimensions": [
+     "merchant"
+    ],
+    "filters": [
+     {
+      "dimension": "sub_method",
+      "op": "=",
+      "values": [
+       "UPI_COLLECT"
+      ]
+     }
+    ],
+    "time_phrase": "the last two weeks",
+    "compare": "previous_period",
+    "grain": "none",
+    "notes": [
+     "Follow-up: kept the previous question's metric, period and filters."
+    ]
+   },
+   "latency_ms": 6026,
    "turns": 3,
    "queries": 47,
    "tokens_in": 0,
@@ -809,7 +1029,27 @@
      ]
     }
    },
-   "latency_ms": 23,
+   "parse": {
+    "question_type": "LOOKUP",
+    "metrics": [
+     "gmv_inr"
+    ],
+    "dimensions": [],
+    "filters": [
+     {
+      "dimension": "region",
+      "op": "=",
+      "values": [
+       "NORTH"
+      ]
+     }
+    ],
+    "time_phrase": "last month",
+    "compare": "none",
+    "grain": "none",
+    "notes": []
+   },
+   "latency_ms": 4,
    "turns": 1,
    "queries": 0,
    "tokens_in": 0,
@@ -843,7 +1083,27 @@
      ]
     }
    },
-   "latency_ms": 32,
+   "parse": {
+    "question_type": "LOOKUP",
+    "metrics": [
+     "gmv_inr"
+    ],
+    "dimensions": [],
+    "filters": [
+     {
+      "dimension": "merchant",
+      "op": "=",
+      "values": [
+       "Zzyzx Foods"
+      ]
+     }
+    ],
+    "time_phrase": "last month",
+    "compare": "none",
+    "grain": "none",
+    "notes": []
+   },
+   "latency_ms": 8,
    "turns": 1,
    "queries": 1,
    "tokens_in": 0,
@@ -873,7 +1133,17 @@
      ]
     }
    },
-   "latency_ms": 6,
+   "parse": {
+    "question_type": "LOOKUP",
+    "metrics": [],
+    "dimensions": [],
+    "filters": [],
+    "time_phrase": null,
+    "compare": "none",
+    "grain": "none",
+    "notes": []
+   },
+   "latency_ms": 1,
    "turns": 1,
    "queries": 0,
    "tokens_in": 0,
@@ -903,7 +1173,19 @@
      ]
     }
    },
-   "latency_ms": 9,
+   "parse": {
+    "question_type": "OFF_TOPIC",
+    "metrics": [
+     "gmv_inr"
+    ],
+    "dimensions": [],
+    "filters": [],
+    "time_phrase": null,
+    "compare": "none",
+    "grain": "none",
+    "notes": []
+   },
+   "latency_ms": 2,
    "turns": 1,
    "queries": 0,
    "tokens_in": 0,
@@ -933,7 +1215,19 @@
      ]
     }
    },
-   "latency_ms": 12044,
+   "parse": {
+    "question_type": "LOOKUP",
+    "metrics": [
+     "success_rate"
+    ],
+    "dimensions": [],
+    "filters": [],
+    "time_phrase": "last week",
+    "compare": "none",
+    "grain": "none",
+    "notes": []
+   },
+   "latency_ms": 2908,
    "turns": 2,
    "queries": 9,
    "tokens_in": 0,
@@ -941,5 +1235,5 @@
    "cost_usd": 0.0
   }
  ],
- "run_id": "ev_575409cf4bbd"
+ "run_id": "ev_5cdf25da9e98"
 }

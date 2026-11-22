@@ -298,5 +298,5 @@ def main(provider: str | None = "offline") -> int:
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
-    ap.add_argument("--llm", choices=["offline", "anthropic", "auto"], default="offline")
+    ap.add_argument("--llm", choices=["offline", "anthropic", "gemini", "auto"], default="offline")
     raise SystemExit(main(ap.parse_args().llm))

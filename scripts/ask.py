@@ -76,7 +76,7 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("question", nargs="?")
     ap.add_argument("--user", default="u_exec")
-    ap.add_argument("--llm", choices=["auto", "anthropic", "offline"], default=None)
+    ap.add_argument("--llm", choices=["auto", "anthropic", "gemini", "offline"], default=None)
     ap.add_argument("--answer", action="append", default=[], help="KEY=option, e.g. METRIC_DEFINITION:success_rate=a")
     ap.add_argument("--interactive", "-i", action="store_true")
     ap.add_argument("--verbose", "-v", action="store_true")

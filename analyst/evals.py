@@ -34,7 +34,10 @@ PASS_GATE = 0.90                                  # SPEC 22: EV01-EV15 >= 90% be
 
 JUDGE_SYSTEM = """You grade answers produced by an AI business analyst for payments data.
 You see the user's question, the answer (headline, facts, hypotheses, recommendations, caveats) and the
-evidence: the queries that ran and their result rows. Score 1-5 on each criterion:
+evidence: the queries that ran with their first result rows, and `computed`, the deterministic analysis
+derived from those queries (decomposition into mix and rate effects, driver ranking, drill-downs, outage
+windows, reconciliation). A number is supported if it appears in the rows or in `computed`, allowing for
+rounding and for display as percent, pp or crore/lakh. Score 1-5 on each criterion:
 - faithfulness: every number and claim in the facts is supported by the evidence rows; nothing invented.
 - separation: facts are things the data shows; explanations that are not proven are labelled hypotheses;
   recommendations follow from them.
@@ -394,12 +397,13 @@ def grade_llm_judge(run: Run, analyst: Analyst) -> tuple[Checks | None, dict]:
     if not r.answer or not r.answer.facts:
         return None, {}
     evidence = [{"id": s.step_id, "purpose": s.purpose, "columns": [c["name"] for c in s.columns],
-                 "rows": s.rows[:20]} for s in r.steps]
+                 "rows": s.rows[:20], "row_count": s.row_count} for s in r.steps]
+    computed = _trim(r.analysis.as_dict()) if r.analysis else None
     a = r.answer
     payload = {"question": r.question, "answer": {"headline": a.headline, "facts": a.facts, "hypotheses": a.hypotheses,
                                                   "recommendations": a.recommendations, "caveats": a.caveats,
                                                   "definitions_used": a.definitions_used},
-               "evidence": evidence}
+               "evidence": evidence, "computed": computed}
     try:
         rep = analyst.llm.json("judge", JUDGE_SYSTEM, json.dumps(payload, default=str), JUDGE_SCHEMA,
                                tier="reasoning", context=payload)
@@ -412,6 +416,17 @@ def grade_llm_judge(run: Run, analyst: Analyst) -> tuple[Checks | None, dict]:
                JUDGE_MIN)
     return ck, {"model": rep.model, "input_tokens": rep.input_tokens, "output_tokens": rep.output_tokens,
                 "cache_read_tokens": rep.cache_read_tokens}
+
+
+def _trim(v, n=12):
+    """Keep the judge's input small: round floats, cut long lists to their first n items."""
+    if isinstance(v, dict):
+        return {k: _trim(x, n) for k, x in v.items() if x not in (None, [], {})}
+    if isinstance(v, list):
+        return [_trim(x, n) for x in v[:n]]
+    if isinstance(v, float):
+        return round(v, 6)
+    return v
 
 
 # --------------------------------------------------------------------------- cost
@@ -467,12 +482,17 @@ def grade(run: Run, analyst: Analyst, truth: dict, pricing: dict) -> dict:
             out[g] = {"status": "PASS" if ck.passed else "FAIL", "checks": ck.items}
     ran = [v for v in out.values() if v["status"] != "SKIPPED"]
     r = run.result
+    it = r.intent if r is not None else None
+    parse = None if it is None else {      # kept so a failure can be traced to the model's reading of the question
+        "question_type": it.question_type, "metrics": it.metrics, "dimensions": it.dimensions,
+        "filters": it.filters, "time_phrase": it.time_phrase, "compare": it.compare, "grain": it.grain,
+        "notes": it.notes}
     return {
         "case_id": case["id"], "category": case.get("category", "other"),
         "question": " → ".join(case.get("conversation") or [case["question"]]), "user": case["user"],
         "passed": bool(ran) and all(v["status"] == "PASS" for v in ran),
         "state": r.state if r else "ERROR", "headline": (r.answer.headline if r and r.answer else (r.message if r else run.error)),
-        "graders": out, "latency_ms": run.latency_ms, "turns": len(run.turns), "queries": len(run.executed_sql),
+        "graders": out, "parse": parse, "latency_ms": run.latency_ms, "turns": len(run.turns), "queries": len(run.executed_sql),
         "tokens_in": sum(u.get("input_tokens", 0) or 0 for u in usages),
         "tokens_out": sum(u.get("output_tokens", 0) or 0 for u in usages),
         "cost_usd": cost_usd(usages, pricing),
@@ -576,6 +596,8 @@ def to_markdown(report: dict) -> str:
             L.append(f"### {r['case_id']}")
             L.append(f"Question: {r['question']}  ")
             L.append(f"State: {r['state']}  ")
+            if r.get("parse"):
+                L.append(f"Parse: `{json.dumps(r['parse'], default=str)}`  ")
             for g, v in r["graders"].items():
                 for c in v.get("checks", []):
                     if not c["passed"]:

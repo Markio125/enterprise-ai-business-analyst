@@ -46,7 +46,8 @@ sql_safety:
 llm:
   # anthropic: Claude via the official SDK (needs ANTHROPIC_API_KEY or an `ant auth login` profile).
   # offline:   deterministic rule-based backend; no network, used by tests and when no key is set.
-  # auto:      anthropic when credentials are present, otherwise offline.
+  # gemini:    Google Gemini via REST (needs GEMINI_API_KEY from Google AI Studio).
+  # auto:      anthropic when Anthropic credentials are present, else gemini when GEMINI_API_KEY is set, else offline.
   provider: auto
   model_reasoning: claude-opus-5-5      # SQL generation / repair
   model_fast: claude-haiku-5-5          # question parsing
@@ -56,6 +57,12 @@ llm:
   refusal_fallback: default             # server-side fallback on safety refusals (Opus only); null to disable
   max_json_retries: 2                   # malformed / semantically invalid LLM output -> retry with the error
   max_sql_repair_attempts: 2            # validator / executor error -> regenerate
+  gemini:                               # used when provider is gemini
+    model_reasoning: gemini-3.5-flash         # SQL generation, answer wording, eval judge
+    model_fast: gemini-3.1-flash-lite         # question parsing
+    max_output_tokens: 16000
+    max_retries: 5                        # 429 / 5xx retried with the server's suggested delay
+    timeout_s: 120
   pricing:                              # USD per million tokens, used for the eval cost report
     claude-opus-5-5:  {input: 4.00, output: 20.00, cache_read: 0.20}
     claude-haiku-5-5: {input: 0.10, output: 0.50}   # prompts <= 100K tokens

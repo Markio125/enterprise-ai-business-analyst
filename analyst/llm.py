@@ -7,6 +7,8 @@ Every LLM call in the pipeline asks for JSON that matches a schema:
 * `AnthropicLLM` calls Claude through the official SDK with structured outputs
   (`output_config.format`), so the reply is always schema-valid JSON. The stable
   system prompt (rules + role-filtered catalog) is marked for prompt caching.
+* `GeminiLLM` calls Google's Gemini REST API (AI Studio key in GEMINI_API_KEY) with
+  JSON-schema structured output, retrying on rate limits and temporary overload.
 * `OfflineLLM` is a deterministic, rule-based stand-in. It reads the structured
   `context` instead of the prompt text. It lets the whole pipeline run (and be
   tested) without network access or an API key, and gives a reproducible baseline.
@@ -20,6 +22,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Protocol
@@ -108,6 +111,104 @@ class AnthropicLLM:
                         getattr(u, "cache_read_input_tokens", 0) or 0, text)
 
 
+# --------------------------------------------------------------------------- Google Gemini (REST)
+GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+GEMINI_DECLINED = ("SAFETY", "RECITATION", "PROHIBITED_CONTENT", "BLOCKLIST", "SPII", "IMAGE_SAFETY")
+
+
+def gemini_api_key() -> str | None:
+    return os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
+
+
+class GeminiLLM:
+    """Gemini through its REST API with `responseJsonSchema`, so replies are schema-shaped JSON.
+
+    Uses httpx (no extra SDK). Rate limits (429) and overload (500/503) are retried with the
+    server's suggested delay or exponential backoff; a daily quota that is used up fails at once.
+    Thinking tokens are billed as output, so they are counted as output tokens."""
+    name = "gemini"
+
+    def __init__(self, settings: dict, client=None, api_key: str | None = None, sleep=time.sleep):
+        import httpx
+        self.cfg = settings["llm"].get("gemini", {})
+        self.key = api_key or gemini_api_key()
+        if not self.key:
+            raise LLMError("set GEMINI_API_KEY to use the Gemini backend")
+        self.client = client or httpx.Client(timeout=float(self.cfg.get("timeout_s", 120)))
+        self.max_retries = int(self.cfg.get("max_retries", 5))
+        self.sleep = sleep
+
+    def _model(self, tier: str) -> str:
+        return self.cfg.get("model_fast" if tier == "fast" else "model_reasoning", "gemini-3-flash-preview")
+
+    def json(self, task, system, user, schema, tier="fast", context=None) -> LLMReply:
+        model = self._model(tier)
+        body = {
+            "systemInstruction": {"parts": [{"text": system}]},
+            "contents": [{"role": "user", "parts": [{"text": user}]}],
+            "generationConfig": {"responseMimeType": "application/json", "responseJsonSchema": schema,
+                                 "maxOutputTokens": int(self.cfg.get("max_output_tokens", 16000))},
+        }
+        started = time.perf_counter()
+        resp = self._post(model, body)
+        ms = int((time.perf_counter() - started) * 1000)
+        j = resp.json()
+        cands = j.get("candidates") or []
+        if not cands:
+            reason = (j.get("promptFeedback") or {}).get("blockReason", "no candidates")
+            raise LLMError(f"the model declined this request ({reason})")
+        c = cands[0]
+        finish = c.get("finishReason", "")
+        if finish in GEMINI_DECLINED:
+            raise LLMError(f"the model declined this request ({finish})")
+        if finish == "MAX_TOKENS":
+            raise LLMError("the model's reply was cut off (max tokens)")
+        text = "".join(p.get("text", "") for p in (c.get("content") or {}).get("parts", []) if not p.get("thought"))
+        try:
+            data = json.loads(text)
+        except json.JSONDecodeError as e:
+            raise LLMError(f"model returned invalid JSON: {e}") from e
+        if not isinstance(data, dict):
+            raise LLMError("model returned JSON that is not an object")
+        u = j.get("usageMetadata") or {}
+        cached = int(u.get("cachedContentTokenCount") or 0)
+        return LLMReply(data, model, ms, int(u.get("promptTokenCount") or 0) - cached,
+                        int(u.get("candidatesTokenCount") or 0) + int(u.get("thoughtsTokenCount") or 0), cached, text)
+
+    def _post(self, model: str, body: dict):
+        import httpx
+        delay = 2.0
+        for attempt in range(self.max_retries + 1):
+            try:
+                r = self.client.post(GEMINI_URL.format(model=model), headers={"x-goog-api-key": self.key}, json=body)
+            except httpx.HTTPError as e:
+                if attempt == self.max_retries:
+                    raise LLMError("cannot reach the LLM provider") from e
+                self.sleep(delay)
+                delay = min(delay * 2, 60)
+                continue
+            if r.status_code == 200:
+                return r
+            try:
+                err = r.json().get("error", {})
+            except ValueError:
+                err = {"message": r.text[:200]}
+            msg = err.get("message", "")
+            retryable = r.status_code in (429, 500, 502, 503, 504)
+            daily = r.status_code == 429 and ("PerDay" in json.dumps(err) or "per day" in msg.lower())
+            if not retryable or daily or attempt == self.max_retries:
+                kind = "quota used up" if daily else f"error {r.status_code}"
+                raise LLMError(f"LLM provider {kind}: {msg[:200]}")
+            wait = delay
+            for d in err.get("details", []):
+                m = re.fullmatch(r"([0-9.]+)s", str(d.get("retryDelay", "")))
+                if m:
+                    wait = float(m.group(1)) + 1
+            self.sleep(min(wait, 90))
+            delay = min(delay * 2, 60)
+        raise LLMError("LLM provider unavailable")
+
+
 # --------------------------------------------------------------------------- offline / scripted
 class OfflineLLM:
     """Deterministic backend. Each task is a plain function of the structured context."""
@@ -161,9 +262,11 @@ def has_anthropic_credentials() -> bool:
 def make_llm(settings: dict, offline_handlers: dict | None = None, provider: str | None = None) -> LLM:
     provider = provider or settings["llm"].get("provider", "auto")
     if provider == "auto":
-        provider = "anthropic" if has_anthropic_credentials() else "offline"
+        provider = ("anthropic" if has_anthropic_credentials() else "gemini" if gemini_api_key() else "offline")
     if provider == "anthropic":
         return AnthropicLLM(settings)
+    if provider == "gemini":
+        return GeminiLLM(settings)
     if provider == "offline":
         return OfflineLLM(offline_handlers)
     raise ValueError(f"unknown llm provider {provider!r}")

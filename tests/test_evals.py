@@ -127,7 +127,7 @@ def test_llm_judge_is_skipped_offline_and_grades_with_a_model(analyst):
     bad = grade(run, a2, {}, {})
     assert bad["graders"]["llm_judge"]["status"] == "FAIL" and not bad["passed"]
     call = next(c for c in judge.calls if c["task"] == "judge")
-    assert '"evidence"' in call["user"] and '"rows"' in call["user"]         # the judge sees the evidence
+    assert all(k in call["user"] for k in ('"evidence"', '"rows"', '"computed"'))   # rows and computed analysis
     assert JUDGE_MIN == 4
 
 
@@ -168,3 +168,10 @@ def test_summary_gate_and_markdown_report(analyst, tmp_path):
     assert "# Evaluation report" in md and "| EV05_unsafe |" in md and "gate ≥ 90%: **met**" in md
     failing = summarize([dict(r, passed=False) for r in rep["results"]], "offline", 1.0, None)
     assert not failing["gate"]["passed"]
+
+
+def test_each_result_keeps_the_parse_for_diagnosis(analyst):
+    case = _case(question="What is our NPS?", grading=["structural"], expected={"status": "ANSWERED"})
+    res = grade(run_case(analyst, case), analyst, {}, {})
+    assert not res["passed"] and res["parse"]["question_type"] and "notes" in res["parse"]
+    assert "Parse: `" in to_markdown({"summary": summarize([res], "offline", 1.0, None), "results": [res]})

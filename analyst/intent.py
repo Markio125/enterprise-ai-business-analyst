@@ -20,6 +20,63 @@ from .semantic import SemanticModel
 QUESTION_TYPES = ["TREND", "COMPARISON", "DRIVER_ANALYSIS", "RANKING", "LOOKUP", "DISTRIBUTION",
                   "RECONCILIATION", "DEFINITION", "OFF_TOPIC"]
 GRAINS = ["none", "hour", "day", "week", "month"]
+# Question types with a fixed analysis template: a model's free-form `custom_request` would replace the template
+TEMPLATE_TYPES = ("DRIVER_ANALYSIS", "TREND", "COMPARISON", "RANKING", "RECONCILIATION")
+# Phrases that show the user chose a metric definition (in addition to each variant's own synonyms)
+VARIANT_CUES = {
+    "order_level": [r"order[ -]?level", r"orders? (?:that )?(?:were )?(?:eventually )?paid", r"after retries",
+                    r"checkout conversion", r"payment conversion", r"order success"],
+    "technical": [r"technical", r"excluding customer", r"customer[ -]attributable"],
+    "attempt_level_all": [r"all attempts", r"including (?:user[ -])?cancel", r"incl\.? (?:user[ -])?cancel"],
+    "attempt_level_excl_user_cancel": [r"attempt[ -]level", r"excluding (?:user[ -])?cancel",
+                                       r"excl\.? (?:user[ -])?cancel", r"without (?:user[ -])?cancel"],
+}
+
+
+# Values of row-scope dimensions are hidden from scoped users' catalogs, so they are read from the phrasing
+SCOPE_VALUE_PATTERNS = {"region": r"\b([a-z]+) (?:region|zone)\b|\b(?:region|zone) ([a-z]+)\b"}
+_NOT_VALUES = {"the", "each", "every", "which", "by", "per", "my", "our", "all", "a", "this", "that", "your",
+               "wise", "level", "manager", "managers", "breakdown", "split", "and", "or"}
+RECONCILIATION_METRICS = ["gmv_inr", "finance_gross_inr", "settled_gmv_inr"]
+_WHY = r"\b(why|what happened|what caused|what changed|explain|reason for|how come)\b"
+_TREND_WORDS = r"\b(trend|trending|trends|over time|daily|weekly|monthly|by day|by week|by month|per day|each day)\b"
+GRAIN_CUES = {
+    "hour": r"\b(hourly|by hour|per hour|each hour|hour by hour|hour wise)\b",
+    "day": r"\b(daily|by day|per day|each day|day by day|day wise|every day)\b",
+    "week": r"\b(weekly|by week|per week|each week|week over week|wow|week wise)\b",
+    "month": r"\b(monthly|by month|per month|each month|month over month|mom|month wise)\b",
+}
+_TIME_DIMS = {"hour", "day", "week", "month", "quarter", "day_of_week", "is_weekend"}
+
+
+def scope_value_from_text(dim: str, question: str, model: SemanticModel | None = None) -> str | None:
+    """'NORTH region' / 'region north' -> NORTH. A word that names a metric or dimension ('GMV region wise')
+    is not a value."""
+    for mm in re.finditer(SCOPE_VALUE_PATTERNS[dim], question.lower()):
+        val = mm.group(1) or mm.group(2)
+        if val in _NOT_VALUES or (model is not None and model.lookup(val)):
+            continue
+        return val.upper()
+    return None
+
+
+def _plain(text: str) -> str:
+    return " " + re.sub(r"[_\-]+", " ", text.lower()) + " "
+
+
+def variant_evidenced(question: str, met, variant: str) -> bool:
+    """Did the user's own words pick this definition? Models tend to fill in the default otherwise."""
+    q = _plain(question)
+    cues = list(VARIANT_CUES.get(variant, [])) + [re.escape(x.lower()) for x in met.variants[variant].synonyms]
+    return any(re.search(rf"\b{c}", q) for c in cues)
+
+
+def dimension_evidenced(question: str, model: SemanticModel, name: str) -> bool:
+    """Is the dimension mentioned (name or synonym, prefix match so 'hourly' counts for hour)?"""
+    q = _plain(question)
+    d = model.dimensions[name]
+    words = {name.replace("_", " "), *map(str.lower, d.synonyms)}
+    return any(re.search(rf"\b{re.escape(_plain(w).strip())}", q) for w in words if w)
 
 # JSON schema for structured outputs: every property required, optional ones nullable.
 INTENT_SCHEMA = {
@@ -196,6 +253,10 @@ def normalize(raw: dict, question: str, model: SemanticModel, catalog: dict,
         if variant and variant not in met.variants:
             problems.append(f"metric {name!r} has no variant {variant!r} (variants: {list(met.variants)})")
             variant = None
+        if variant and not variant_evidenced(question, met, variant):
+            it.notes.append(f"Ignored the parser's choice of the {variant} definition of {name}: "
+                            "the question doesn't name a definition.")
+            variant = None
         add_metric(f"{name}:{variant}" if variant else name, term or name, bool(variant))
 
     for d in raw.get("dimensions") or []:
@@ -204,9 +265,12 @@ def normalize(raw: dict, question: str, model: SemanticModel, catalog: dict,
         if not name:
             problems.append(f"dimension {d!r} is not in the catalog")
             it.unknown_terms.append(d)
+        elif not dimension_evidenced(question, model, name) and not it.is_follow_up:
+            it.notes.append(f"Ignored a breakdown by {name}: the question doesn't mention it.")
         elif name not in it.dimensions:
             it.dimensions.append(name)
 
+    scope_dims = {x["dimension"] for x in catalog.get("scope", [])}
     for f in raw.get("filters") or []:
         dim = f.get("dimension")
         name = dim if dim in model.dimensions else next(
@@ -218,6 +282,9 @@ def normalize(raw: dict, question: str, model: SemanticModel, catalog: dict,
         for v in f.get("values") or []:
             if name in values:
                 snapped = snap_value(v, values[name])
+                if snapped is None and name in scope_dims:
+                    vals.append(str(v).upper())      # outside the user's scope: the access pre-check refuses it
+                    continue
                 if snapped is None:
                     problems.append(f"{v!r} is not a value of {name} (values: {', '.join(values[name][:20])})")
                     continue
@@ -226,6 +293,38 @@ def normalize(raw: dict, question: str, model: SemanticModel, catalog: dict,
                 vals.append(str(v))      # high-cardinality (merchant, city): resolved later, in scope
         if vals:
             it.filters.append({"dimension": name, "op": f.get("op") or "=", "values": vals})
+
+    # Deterministic guards: the parse must agree with the question's own words, whatever the model said
+    low = question.lower()
+    for dim in SCOPE_VALUE_PATTERNS:
+        val = scope_value_from_text(dim, question, model)
+        if val and dim in model.dimensions and not any(f["dimension"] == dim for f in it.filters):
+            it.filters.append({"dimension": dim, "op": "=", "values": [val]})
+            it.dimensions = [d for d in it.dimensions if d != dim]
+            it.notes.append(f"Read the {dim} filter {val} from the question.")
+    if it.grain in GRAIN_CUES and not re.search(GRAIN_CUES[it.grain], _plain(question)):
+        it.notes.append(f"Ignored a {it.grain}-level grain: the question doesn't ask for one.")
+        it.grain = "none"
+    if it.metrics and it.question_type in ("TREND", "RANKING", "LOOKUP") and re.search(_WHY, low):
+        it.notes.append(f"Treated as a driver analysis ('why' question), not {it.question_type}.")
+        it.question_type = "DRIVER_ANALYSIS"
+    if it.question_type == "DRIVER_ANALYSIS" and it.compare == "none":
+        it.compare = "previous_period"
+    if (it.question_type == "TREND" and it.grain == "none" and not re.search(_TREND_WORDS, low)
+            and any(d not in _TIME_DIMS for d in it.dimensions)):
+        it.notes.append("Treated as a breakdown for one period, not a trend.")
+        it.question_type = "DISTRIBUTION"
+    if it.question_type == "RECONCILIATION":
+        have = [m.partition(":")[0] for m in it.metrics]
+        for n in RECONCILIATION_METRICS:
+            if n in cat_metrics and n not in have:
+                it.metrics.append(n)
+                it.metric_terms[n] = n
+
+    if it.custom_request and it.question_type in TEMPLATE_TYPES and it.metrics:
+        it.notes.append(f"Used the {it.question_type} analysis instead of a custom query "
+                        f"({it.custom_request[:80]!r}).")
+        it.custom_request = None
 
     r = raw.get("ranking")
     if r:
@@ -412,13 +511,11 @@ def offline_parse(ctx: dict) -> dict:
             mark(i, n)
 
     # values of scope dimensions are hidden from scoped users' catalogs; read them from the phrasing
-    for dim, pat in (("region", r"\b([a-z]+) (?:region|zone)\b|\b(?:region|zone) ([a-z]+)\b"),):
-        mm = re.search(pat, text)
-        if mm and not any(f["dimension"] == dim for f in filters):
-            val = (mm.group(1) or mm.group(2)).upper()
-            if val.lower() not in ("the", "each", "every", "which", "by", "per", "my", "our", "all", "a"):
-                filters.append({"dimension": dim, "op": "=", "values": [val]})
-                dims[:] = [d for d in dims if d != dim]
+    for dim in SCOPE_VALUE_PATTERNS:
+        val = scope_value_from_text(dim, text, model)
+        if val and not any(f["dimension"] == dim for f in filters):
+            filters.append({"dimension": dim, "op": "=", "values": [val]})
+            dims[:] = [d for d in dims if d != dim]
 
     # 4. merchant names in quotes or after "for merchant X"
     m = re.search(r"(?:merchant|for)\s+['\"]([^'\"]+)['\"]", q) or re.search(r"['\"]([^'\"]{3,})['\"]", q)
@@ -466,7 +563,7 @@ def offline_parse(ctx: dict) -> dict:
                                                r"just|show me that|for)\b", low)) or not metrics)
     if qtype == "RECONCILIATION":
         names = {mm["metric"] for mm in metrics}
-        wanted = ["gmv_inr", "finance_gross_inr", "settled_gmv_inr"]
+        wanted = RECONCILIATION_METRICS
         metrics = [{"term": n, "metric": n, "variant": None} for n in wanted if n in cat_metric_names] or metrics
         if names - set(wanted) - {None}:
             metrics += [mm for mm in metrics if mm["metric"] not in wanted]

@@ -5,11 +5,11 @@ An AI analyst for payments data. You ask a business question in plain English (*
 **Start here:**
 - [**Design write-up**](docs/WRITEUP.md): what was built, the key decisions, how each failure scenario is handled, results and limitations.
 - [**Architecture**](docs/ARCHITECTURE.md): component, lifecycle and data-access diagrams.
-- [**Eval report**](evals/REPORT.md): 20/20 known-answer cases; EV01–EV15 at 100% against the 90% gate.
+- **Eval reports:** [offline](evals/REPORT.md) 20/20 known-answer cases; [Gemini](evals/gemini/REPORT.md) 19/20 with the LLM judge; EV01–EV15 meet the 90% gate on both.
 - [**Demo script**](docs/DEMO.md): a 10-minute walkthrough. `python scripts/demo.py` plays it in a terminal.
 - [Full specification](docs/SPEC.md).
 
-Runs fully offline with no API key (rule-based parsing and wording). With `ANTHROPIC_API_KEY` set, Claude parses questions, writes SQL for custom requests and words answers. The safety gate, analysis and number checks are the same either way.
+Runs fully offline with no API key (rule-based parsing and wording). With `ANTHROPIC_API_KEY` (Claude) or `GEMINI_API_KEY` (Gemini) set, the model parses questions, writes SQL for custom requests and words answers. The safety gate, analysis and number checks are the same either way.
 
 ## Status
 
@@ -249,15 +249,27 @@ COMPOSITION + GROUNDING_CHECK (segment 6) ──▶ ANSWERED | ANSWERED_LOW_CONF
 
 ### LLM backends
 
-[`analyst/llm.py`](analyst/llm.py) has one interface, `llm.json(task, system, user, schema, tier)`, with three implementations:
+[`analyst/llm.py`](analyst/llm.py) has one interface, `llm.json(task, system, user, schema, tier)`, with four implementations:
 
 | Backend | When | Notes |
 |---|---|---|
 | `AnthropicLLM` | `llm.provider: auto` with `ANTHROPIC_API_KEY` (or an `ant auth login` profile) set, or `--llm anthropic` | Official `anthropic` SDK with structured outputs (`output_config.format`). The stable system prompt is cached (`cache_control`). Effort is `low` for parsing and `medium` for SQL. Opus calls opt into the server-side refusal fallback (`fallbacks: "default"`). Refusals and `max_tokens` cut-offs raise, so the pipeline fails gracefully. |
+| `GeminiLLM` | `GEMINI_API_KEY` (Google AI Studio) set and no Anthropic credentials, or `--llm gemini` | Gemini REST API through `httpx` (no extra SDK) with `responseJsonSchema` structured output. Retries 429/5xx with the server's suggested delay; a used-up daily quota fails at once. Models in `llm.gemini` (`gemini-3.1-flash-lite` for parsing, `gemini-3.5-flash` for SQL, wording and the eval judge). Thinking tokens count as output. |
 | `OfflineLLM` | no credentials (the default here) | Deterministic rule-based parser in [`analyst/intent.py`](analyst/intent.py). It reads the structured context rather than the prompt and covers the demo and eval questions. It cannot write custom SQL and says so. |
 | `ScriptedLLM` | tests | Replays canned replies (including invalid JSON and dangerous SQL) to drive retries, the repair loop and the gate. |
 
-Configuration lives in `config/analyst.yaml` under `llm:`, `defaults:` and `ambiguity:`. `scripts/check_pipeline.py --llm anthropic` runs the same eval checks through Claude.
+Configuration lives in `config/analyst.yaml` under `llm:`, `defaults:` and `ambiguity:`. `scripts/check_pipeline.py --llm anthropic` (or `--llm gemini`) runs the same eval checks through a real model.
+
+**The model's parse is checked against the question's own words.** Testing with Gemini showed a real model fills in things the user never said. [`normalize`](analyst/intent.py) now corrects them deterministically, whatever the model, and notes each change in the trace:
+
+| What the model did | What happens now |
+|---|---|
+| Picked the default success-rate definition itself, which skipped the clarification | A definition counts as chosen only if the question names it ("order-level", "technical", "all attempts"…) |
+| Added breakdowns or a daily grain nobody asked for | Kept only if the question mentions them ("by issuer", "hourly", "weekly"…) |
+| Answered "why …" or "what happened …" as a trend or ranking | Treated as a driver analysis, with a previous-period comparison |
+| Read "X by Y for a period" as a trend | Treated as a one-period breakdown |
+| Returned a reconciliation with no metrics and a free-form custom query instead | Both sources are filled in; a custom query never replaces an analysis template |
+| Dropped "NORTH region" for a WEST-scoped user, because the value isn't in their catalogue | The value is kept, so the access check refuses it, instead of quietly answering for WEST |
 
 ## Analysis engine (segment 5)
 
@@ -438,13 +450,24 @@ A case passes when every grader that ran passed. The report gives pass rate per 
 python scripts/run_evals.py                   # offline; writes evals/REPORT.md and evals/last_run.json
 python scripts/run_evals.py --case EV01 EV08  # a subset
 python scripts/run_evals.py --llm anthropic   # through Claude, with the LLM judge
+python scripts/run_evals.py --llm gemini --out evals/gemini   # through Gemini (GEMINI_API_KEY)
 ```
 
 Admins can also run the suite from the UI sidebar or with `POST /api/v1/evals/run` (`{"cases": [...]}` optional).
 
 [`tests/test_evals.py`](tests/test_evals.py) checks that the graders **fail** wrong answers: a changed expected value, the wrong status, a reference query over the raw (duplicated) table, a simulated DELETE reaching the executor, and a low judge score each flip the grade.
 
-**Current result** (offline backend, full warehouse): 20/20 cases, EV01–EV15 15/15. Every numeric and SQL-equivalence check matches the ground truth exactly. The LLM judge was not run, because there is no API key on this machine.
+**Results** (full warehouse):
+
+| Backend | Cases | EV01–EV15 | LLM judge | Report |
+|---|---|---|---|---|
+| offline (rules) | 20/20 | 15/15 | skipped | [evals/REPORT.md](evals/REPORT.md) |
+| Gemini, first run | 13/20 | 9/15 (gate not met) | 0/3 passed | [evals/gemini/run1-REPORT.md](evals/gemini/run1-REPORT.md) |
+| Gemini, after the fixes | 19/20 | 14/15 (gate met) | 2/2 passed (3 skipped: daily quota) | [evals/gemini/REPORT.md](evals/gemini/REPORT.md) |
+
+The first Gemini run exposed the parse problems in the table under [LLM backends](#llm-backends). It also exposed a harness flaw: the judge saw only the first 20 rows of each query, not the computed analysis behind the facts, so it marked correct numbers as unsupported. Both were fixed, and every fix has a regression test ([`tests/test_gemini.py`](tests/test_gemini.py)). The offline run is unchanged at 20/20.
+
+The remaining Gemini failure varies between runs. A run before the final one failed only EV13 (fixed since). The final run failed only EV02, which then passed three times out of three when repeated. The model's parse is not deterministic, and the guards don't yet cover whatever reading it produced that time. Each eval result now records the parsed intent, and the report prints it for every failure, so the next variation can be diagnosed. Gemini ran on the free tier, so cost is $0 and latency includes waits for rate limits. The reasoning model moved from `gemini-3-flash-preview` to `gemini-3.5-flash` after the first run, because the preview model's daily free quota ran out. Claude has not been evaluated: the Anthropic key available had no API credits.
 
 These cases test that the system finds the planted answers end to end. They are not a measure of generalisation to new phrasings; see the [write-up](docs/WRITEUP.md#evaluation).
 
@@ -513,7 +536,8 @@ docs/SPEC.md        full system specification
 - The UI is a demo client, not a hardened product. There is no real sign-in (anyone who can reach the server can pick any user), and charts are hand-drawn SVG rather than a charting library, to keep it dependency-free.
 - Mock authentication: `X-User-Id` must be replaced by real identity (SSO/JWT) before any deployment. Event streams are kept in process memory (replayed from the metadata DB after a restart), so the API runs as a single process; several processes would need a shared event bus.
 - Grounding checks that each number traces to a computed value. It does not check that the surrounding claim is right (e.g. a rewrite that attaches a correct number to the wrong segment). Keeping the facts' structure fixed and only letting the model reword limits that risk; the eval checks also assert key claims.
-- The eval cases come from the same planted anomalies the analysis was built around. They show the system finds known answers end to end, not that it generalises; a held-out question set and a Claude run with the LLM judge are the next step.
+- The Gemini runs used the free tier: rate-limit waits inflate latency, daily quotas cut the judge short, and cost shows $0 because no Gemini prices are configured.
+- The eval cases come from the same planted anomalies the analysis was built around. They show the system finds known answers end to end, not that it generalises; a held-out question set is the next step.
 - There is no recorded demo video. [`docs/DEMO.md`](docs/DEMO.md) and `scripts/demo.py` give a reproducible walkthrough instead.
 - The offline parser is rules, tuned on the demo and eval questions. Real phrasing variety needs the Claude backend. No live Claude run is part of this commit: no API key was available here. The request shape is unit-tested against a fake client.
 - Merchant-name entity resolution is exact, then unique substring, then a fuzzy "did you mean". Names are not unique across regions; resolution only ever sees the user's scope.

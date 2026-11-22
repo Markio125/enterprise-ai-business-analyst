@@ -23,7 +23,7 @@ A working system ([architecture](ARCHITECTURE.md)):
 - **Web UI:** a no-build page with a role switcher, live progress, clarification forms, the answer card, charts, evidence (SQL, access rules applied, rows, re-run) and a steps timeline.
 - **Eval harness:** 20 known-answer cases ([report](../evals/REPORT.md)), with a terminal demo and a timed [demo script](DEMO.md).
 
-Tests: 300 unit and integration tests, plus full-warehouse checks that re-derive the ground truth through the semantic layer, the safety gate and the pipeline.
+Tests: 313 unit and integration tests, plus full-warehouse checks that re-derive the ground truth through the semantic layer, the safety gate and the pipeline.
 
 ## The central design decision
 
@@ -37,7 +37,7 @@ Tests: 300 unit and integration tests, plus full-warehouse checks that re-derive
 | Every number | Executed queries + deterministic analysis code | Decomposition, ranking and reconciliation are exact arithmetic, testable against ground truth |
 | The wording | Model, under a grounding check | A rewrite that introduces any number not in the computed results is discarded |
 
-So the system degrades gracefully. With no API key it runs fully offline, with rule-based parsing and template wording, and still passes every eval case. A model makes the language better, not the numbers.
+So the system degrades gracefully. With no API key it runs fully offline, with rule-based parsing and template wording, and still passes every eval case. With Claude or Gemini, the model improves the language, not the numbers.
 
 ## How each failure scenario is handled
 
@@ -75,14 +75,35 @@ The residual is ₹0, and the answer recommends which source to use for which pu
 - **numeric:** headline rates, decomposition totals, counts, rows and reconciliation factors against the ground truth;
 - **structural:** status, ambiguity types, caveat codes, top driver, scope disclosure, RLS in every executed query, and nothing forbidden at the executor;
 - **SQL equivalence:** hand-written reference SQL must return the same result set as the step the pipeline ran;
-- **LLM judge:** faithfulness, fact/hypothesis separation and clarity, scored with the evidence in view.
+- **LLM judge:** faithfulness, fact/hypothesis separation and clarity, scored with the evidence in view (query rows and the computed analysis).
 
-Current result ([report](../evals/REPORT.md)): **20/20 cases; EV01–EV15 15/15**, against the spec's 90% gate.
+Results on the full warehouse:
+
+| Backend | Cases | EV01–EV15 | LLM judge |
+|---|---|---|---|
+| offline rules ([report](../evals/REPORT.md)) | 20/20 | 15/15 | skipped |
+| Gemini, first run ([report](../evals/gemini/run1-REPORT.md)) | 13/20 | 9/15 | 0/3 |
+| Gemini, after fixes ([report](../evals/gemini/REPORT.md)) | 19/20 | 14/15 | 2/2 (3 skipped: daily quota) |
+
+**What the real model exposed.** The first Gemini run failed every analysis case, though safety, access and ambiguity held. Gemini (Flash-Lite for parsing) did things a user never asked for:
+- picked a success-rate definition itself, which skipped the clarification;
+- added unasked breakdowns and a daily grain;
+- read "what happened…" and "…and why?" as trends and rankings;
+- returned a reconciliation with no metrics and a free-form custom query, which replaced the analysis template;
+- for a WEST-scoped user, let "NORTH region" fall away, because the value isn't in their catalogue.
+
+The last one was a bug in my code. The answer was GMV for WEST, which is no leak, since row-level security still applied, but it answered a different question than the one asked.
+
+The fix was not prompt tuning but more of the central principle: the parse must agree with the question's own words. `normalize` now checks each choice against the question text and corrects it deterministically, noting the change in the trace. Each fix has a regression test built from Gemini's actual output.
+
+The run also caught a harness flaw: the judge saw only raw query rows, not the computed analysis the facts come from, so it marked correct numbers as unsupported.
+
+The one remaining Gemini failure moves between runs. The parse is not deterministic, and the guards don't yet cover every reading. Eval results now record the parse, so the next failure can be traced.
 
 The graders are tested to fail wrong answers, not only to pass right ones: a changed expected value, the wrong status, a reference query over the raw (duplicated) table, a simulated DELETE leaking past the gate, and a low judge score all flip the grade.
 
 What the number does not show:
-- It's the offline backend on the data it was built for. The LLM judge was skipped, because there's no API key on this machine.
+- Gemini ran on the free tier: latency includes rate-limit waits, the judge was cut short by daily quotas, and cost isn't priced. Claude has not been evaluated: the Anthropic key available had no API credits.
 - The cases came from the same planted anomalies the analysis was tuned on. They test that the system finds known answers end to end, not how it generalises to new questions.
 - The next step would be a held-out set of questions written by someone else, run through Claude, with judge scores.
 
@@ -108,7 +129,7 @@ What the number does not show:
 
 ## What I would do next
 
-1. Run the eval suite through Claude (`python scripts/run_evals.py --llm anthropic`) to get judge scores and real cost and latency figures, then hill-climb the prompts against it.
+1. Run the eval suite through Claude (`--llm anthropic`) and a paid Gemini tier, several times each, to measure run-to-run variance and get judge scores on every case. Then extend the parse guards wherever failures recur.
 2. Write a held-out question set with a payments analyst, phrased differently from the planted cases.
 3. Materialise the deduplicated attempts table (and partition by date) so driver analyses take seconds.
 4. Replace the mock header with SSO/JWT and map identity-provider groups to roles. Move the event streams onto a shared bus so the API can scale out.
